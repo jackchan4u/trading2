@@ -1,0 +1,149 @@
+{
+  "twelveDataKey": "",
+  "secUserAgent": "PulseBoard/1.0 (contact: jaumecs1@hotmail.es)",
+  "pressFallbackLatest": false,
+  "pressMaxAgeHours": 0,
+  "minSymbolRefreshSec": 300,
+  "pressFeedMap": {
+    "NVDA": [
+      "https://nvidianews.nvidia.com/rss.xml"
+    ],
+    "MRVL": [
+      "https://investor.marvell.com/news-events/press-releases/rss"
+    ],
+    "AMD": [
+      "https://ir.amd.com/news-events/press-releases/rss"
+    ],
+    "CRWV": [
+      "https://www.coreweave.com/blog/rss.xml"
+    ],
+    "APLD": [
+      "https://ir.applieddigital.com/news-events/press-releases/rss"
+    ],
+    "CLSK": [
+      "https://www.cleanspark.com/feed"
+    ],
+    "SOUN": [
+      "https://investors.soundhound.com/rss/news-releases.xml"
+    ],
+    "BTC": [
+      "https://bitcoincore.org/en/rss.xml",
+      "https://bitcoin.org/en/rss/releases.rss"
+    ],
+    "HBAR": [
+      "https://hedera.com/feed/"
+    ],
+    "XLM": [
+      "https://stellar.org/blog/rss.xml"
+    ]
+  },
+  "pressAllowedDomains": {
+    "NVDA": [
+      "nvidianews.nvidia.com",
+      "investor.nvidia.com"
+    ],
+    "MRVL": [
+      "marvell.com",
+      "investor.marvell.com"
+    ],
+    "AMD": [
+      "amd.com",
+      "ir.amd.com"
+    ],
+    "UNH": [
+      "unitedhealthgroup.com",
+      "investors.unitedhealthgroup.com"
+    ],
+    "CRWV": [
+      "coreweave.com"
+    ],
+    "QBTS": [
+      "dwavesys.com",
+      "ir.dwavesys.com"
+    ],
+    "APLD": [
+      "applieddigital.com",
+      "ir.applieddigital.com"
+    ],
+    "PSTG": [
+      "purestorage.com",
+      "investors.purestorage.com"
+    ],
+    "CLSK": [
+      "cleanspark.com",
+      "investors.cleanspark.com"
+    ],
+    "SOUN": [
+      "soundhound.com",
+      "investors.soundhound.com"
+    ],
+    "LSMC": [
+      "amundi.com",
+      "amundietf.com"
+    ],
+    "BTC": [
+      "bitcoincore.org",
+      "bitcoin.org"
+    ],
+    "XRP": [
+      "ripple.com"
+    ],
+    "HBAR": [
+      "hedera.com"
+    ],
+    "ADA": [
+      "cardanofoundation.org",
+      "iohk.io"
+    ],
+    "XLM": [
+      "stellar.org"
+    ]
+  },
+  "pressSourcePages": {
+    "NVDA": [
+      "https://nvidianews.nvidia.com/news/latest",
+      "https://investor.nvidia.com/news-and-events/press-releases/default.aspx"
+    ],
+    "MRVL": [
+      "https://investor.marvell.com/news-releases"
+    ],
+    "AMD": [
+      "https://ir.amd.com/news-events/press-releases"
+    ],
+    "UNH": [
+      "https://www.unitedhealthgroup.com/newsroom.html"
+    ],
+    "CRWV": [
+      "https://www.coreweave.com/blog"
+    ],
+    "QBTS": [
+      "https://www.dwavesys.com/company/newsroom"
+    ],
+    "APLD": [
+      "https://ir.applieddigital.com/news-releases"
+    ],
+    "PSTG": [
+      "https://www.purestorage.com/company/newsroom.html"
+    ],
+    "CLSK": [
+      "https://www.cleanspark.com/news/"
+    ],
+    "BTC": [
+      "https://bitcoincore.org/en/releases/",
+      "https://bitcoin.org/en/bitcoin-core/"
+    ],
+    "XRP": [
+      "https://ripple.com/insights/"
+    ],
+    "HBAR": [
+      "https://hedera.com/blog",
+      "https://hedera.com/news"
+    ],
+    "ADA": [
+      "https://cardanofoundation.org/en/news/"
+    ],
+    "XLM": [
+      "https://stellar.org/blog"
+    ]
+  }
+}

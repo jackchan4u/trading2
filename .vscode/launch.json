@@ -1,0 +1,25 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Backend Yahoo (Flask)",
+      "type": "node-terminal",
+      "request": "launch",
+      "command": "bash scripts/run.sh",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "Abrir en Chrome",
+      "type": "pwa-chrome",
+      "request": "launch",
+      "url": "http://localhost:4173",
+      "webRoot": "${workspaceFolder}"
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Market Tracker: Run",
+      "configurations": ["Backend Yahoo (Flask)", "Abrir en Chrome"]
+    }
+  ]
+}
