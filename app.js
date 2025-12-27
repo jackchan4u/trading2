@@ -55,6 +55,14 @@ const NEWS_REFRESH_MS = 3 * 60 * 1000;
 const PRESS_REFRESH_MS = 6 * 60 * 1000;
 const CRYPTO_NEWS_REFRESH_MS = 6 * 60 * 1000;
 const CRYPTO_PRESS_REFRESH_MS = 8 * 60 * 1000;
+const MARKET_TIMEZONE = "America/New_York";
+const MARKET_STATE_STALE_MS = 15 * 60 * 1000;
+const LIST_CACHE_LIMIT = 60;
+const PRESS_STORAGE_KEY = "pressCacheV1";
+const NEWS_STORAGE_KEY = "newsCacheV1";
+const FILINGS_STORAGE_KEY = "filingsCacheV1";
+const CRYPTO_NEWS_STORAGE_KEY = "cryptoNewsCacheV1";
+const CRYPTO_PRESS_STORAGE_KEY = "cryptoPressCacheV1";
 
 const state = {
   stockIntervalMs: DEFAULT_STOCK_INTERVAL_SEC * 1000,
@@ -193,6 +201,100 @@ function formatDateTime(timestamp) {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+function getLocalMarketState() {
+  if (typeof Intl === "undefined" || !Intl.DateTimeFormat) return null;
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: MARKET_TIMEZONE,
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+  const parts = formatter.formatToParts(new Date());
+  const values = {};
+  parts.forEach((part) => {
+    if (part.type !== "literal") values[part.type] = part.value;
+  });
+  const weekday = values.weekday;
+  const hour = Number(values.hour);
+  const minute = Number(values.minute);
+  const dayIndex = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].indexOf(weekday);
+  if (!Number.isFinite(hour) || !Number.isFinite(minute) || dayIndex < 0) return null;
+  if (dayIndex === 0 || dayIndex === 6) return "closed";
+  const total = hour * 60 + minute;
+  if (total >= 240 && total < 570) return "premarket";
+  if (total >= 570 && total < 960) return "open";
+  if (total >= 960 && total < 1200) return "after";
+  return "closed";
+}
+
+function resolveMarketState(serverState, updatedAtMs) {
+  if (serverState && serverState !== "closed") return serverState;
+  const localState = getLocalMarketState();
+  if (!localState || localState === "closed") return serverState || "closed";
+  if (!updatedAtMs || Date.now() - updatedAtMs > MARKET_STATE_STALE_MS) {
+    return serverState || "closed";
+  }
+  return localState;
+}
+
+function buildItemId(item) {
+  if (!item || typeof item !== "object") return "";
+  if (item.link) return String(item.link);
+  const fallback = [item.symbol, item.form, item.title, item.date]
+    .filter(Boolean)
+    .join("|");
+  return fallback;
+}
+
+function getItemTimestamp(item) {
+  const direct = Number(item.timestamp);
+  if (Number.isFinite(direct)) return direct;
+  const dateValue = item && item.date ? Date.parse(item.date) : NaN;
+  if (!Number.isNaN(dateValue)) return dateValue / 1000;
+  return 0;
+}
+
+function readListCache(storageKey) {
+  try {
+    const raw = localStorage.getItem(storageKey);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (error) {
+    return [];
+  }
+}
+
+function writeListCache(storageKey, items) {
+  try {
+    localStorage.setItem(storageKey, JSON.stringify(items));
+  } catch (error) {
+    return;
+  }
+}
+
+function mergeCachedItems(storageKey, incoming, limit) {
+  const existing = readListCache(storageKey);
+  const map = new Map();
+  const allItems = existing.concat(incoming || []);
+  allItems.forEach((item) => {
+    const id = buildItemId(item);
+    if (!id) return;
+    if (map.has(id)) {
+      map.set(id, { ...map.get(id), ...item });
+    } else {
+      map.set(id, item);
+    }
+  });
+  const merged = Array.from(map.values()).sort(
+    (a, b) => getItemTimestamp(b) - getItemTimestamp(a)
+  );
+  const limited = merged.slice(0, limit);
+  writeListCache(storageKey, limited);
+  return limited;
 }
 
 function loadHistory() {
@@ -637,7 +739,11 @@ async function loadFilings() {
   if (!dom.filingsList) return;
   dom.filingsList.innerHTML = "<div class=\"empty\">Cargando informes...</div>";
   try {
-    const items = await fetchFilings();
+    const items = mergeCachedItems(
+      FILINGS_STORAGE_KEY,
+      await fetchFilings(),
+      LIST_CACHE_LIMIT
+    );
     if (!items.length) {
       dom.filingsList.innerHTML = "<div class=\"empty\">Sin informes recientes.</div>";
       return;
@@ -665,6 +771,23 @@ async function loadFilings() {
       )
       .join("");
   } catch (error) {
+    const cached = readListCache(FILINGS_STORAGE_KEY);
+    if (cached.length) {
+      dom.filingsList.innerHTML = cached
+        .map(
+          (item) => `
+        <div class="list-item">
+          <div>
+            <div class="list-title">${item.form || "Informe"}</div>
+            <div class="list-meta">${[item.symbol, item.date].filter(Boolean).join(" · ")}</div>
+          </div>
+          <a class="link" href="${item.link}" target="_blank" rel="noopener">Ver</a>
+        </div>
+      `
+        )
+        .join("");
+      return;
+    }
     dom.filingsList.innerHTML = `<div class="empty">${error.message}</div>`;
   }
 }
@@ -673,7 +796,11 @@ async function loadNews() {
   if (!dom.newsList) return;
   dom.newsList.innerHTML = "<div class=\"empty\">Cargando noticias...</div>";
   try {
-    const items = await fetchNews();
+    const items = mergeCachedItems(
+      NEWS_STORAGE_KEY,
+      await fetchNews(),
+      LIST_CACHE_LIMIT
+    );
     if (!items.length) {
       dom.newsList.innerHTML = "<div class=\"empty\">Sin noticias recientes.</div>";
       return;
@@ -700,6 +827,31 @@ async function loadNews() {
       )
       .join("");
   } catch (error) {
+    const cached = readListCache(NEWS_STORAGE_KEY);
+    if (cached.length) {
+      dom.newsList.innerHTML = cached
+        .map(
+          (item) => {
+            const classification = formatClassification(item.classification);
+            const impact = formatImpact(item.impact);
+            const ignore = formatIgnoreFlag(item.ignore);
+            const reason = normalizeText(item.reason, "Sin datos verificables");
+            return `
+        <div class="list-item">
+          <div>
+            <div class="list-title">${getTranslatedTitle(item, "Noticia")}</div>
+            <div class="list-meta">${[item.symbol, item.date].filter(Boolean).join(" · ")}</div>
+            <div class="list-meta">Clasificacion: ${classification} · Impacto: ${impact} · ${ignore}</div>
+            <div class="list-meta">Motivo: ${reason}</div>
+          </div>
+          <a class="link" href="${item.link}" target="_blank" rel="noopener">Leer</a>
+        </div>
+      `;
+          }
+        )
+        .join("");
+      return;
+    }
     dom.newsList.innerHTML = `<div class="empty">${error.message}</div>`;
   }
 }
@@ -708,7 +860,11 @@ async function loadPress() {
   if (!dom.pressList) return;
   dom.pressList.innerHTML = "<div class=\"empty\">Cargando notas de prensa...</div>";
   try {
-    const items = await fetchPress();
+    const items = mergeCachedItems(
+      PRESS_STORAGE_KEY,
+      await fetchPress(),
+      LIST_CACHE_LIMIT
+    );
     const officialItems = items.filter((item) => item.official === true);
     const fallbackItems = items.filter((item) => item.fallback === true);
     if (!officialItems.length) {
@@ -751,6 +907,51 @@ async function loadPress() {
       .join("");
     dom.pressList.innerHTML = list;
   } catch (error) {
+    const cached = readListCache(PRESS_STORAGE_KEY);
+    if (cached.length) {
+      const officialItems = cached.filter((item) => item.official === true);
+      const fallbackItems = cached.filter((item) => item.fallback === true);
+      if (!officialItems.length) {
+        if (!fallbackItems.length) {
+          dom.pressList.innerHTML = "<div class=\"empty\">Sin NDP oficiales.</div>";
+          return;
+        }
+        const hint =
+          "<div class=\"list-hint\">Sin NDP oficiales; mostrando ultima noticia por ticker (no oficial).</div>";
+        const list = fallbackItems
+          .map(
+            (item) => `
+        <div class="list-item">
+          <div>
+            <div class="list-title">${getTranslatedTitle(item, "Nota de prensa")}</div>
+            <div class="list-meta">${[item.symbol, item.date].filter(Boolean).join(" · ")}</div>
+            <div class="list-meta">No oficial (solo comprobacion)</div>
+          </div>
+          <a class="link" href="${item.link}" target="_blank" rel="noopener">Leer</a>
+        </div>
+      `
+          )
+          .join("");
+        dom.pressList.innerHTML = `${hint}${list}`;
+        return;
+      }
+      const list = officialItems
+        .map(
+          (item) => `
+        <div class="list-item">
+          <div>
+            <div class="list-title">${getTranslatedTitle(item, "Nota de prensa")}</div>
+            <div class="list-meta">${[item.symbol, item.date].filter(Boolean).join(" · ")}</div>
+            <div class="list-meta">Fuente oficial: ${item.source || "N/D"}</div>
+          </div>
+          <a class="link" href="${item.link}" target="_blank" rel="noopener">Leer</a>
+        </div>
+      `
+        )
+        .join("");
+      dom.pressList.innerHTML = list;
+      return;
+    }
     dom.pressList.innerHTML = `<div class="empty">${error.message}</div>`;
   }
 }
@@ -760,10 +961,35 @@ async function loadCryptoPress() {
   dom.cryptoPressList.innerHTML =
     "<div class=\"empty\">Cargando notas de prensa cripto...</div>";
   try {
-    const items = await fetchCryptoPress();
+    const items = mergeCachedItems(
+      CRYPTO_PRESS_STORAGE_KEY,
+      await fetchCryptoPress(),
+      LIST_CACHE_LIMIT
+    );
     const officialItems = items.filter((item) => item.official === true);
+    const fallbackItems = items.filter((item) => item.fallback === true);
     if (!officialItems.length) {
-      dom.cryptoPressList.innerHTML = "<div class=\"empty\">Sin NDP oficiales.</div>";
+      if (!fallbackItems.length) {
+        dom.cryptoPressList.innerHTML = "<div class=\"empty\">Sin NDP oficiales.</div>";
+        return;
+      }
+      const hint =
+        "<div class=\"list-hint\">Sin NDP oficiales; mostrando ultima noticia por ticker (no oficial).</div>";
+      const list = fallbackItems
+        .map(
+          (item) => `
+        <div class="list-item">
+          <div>
+            <div class="list-title">${getTranslatedTitle(item, "Nota de prensa")}</div>
+            <div class="list-meta">${[item.symbol, item.date].filter(Boolean).join(" · ")}</div>
+            <div class="list-meta">No oficial (solo comprobacion)</div>
+          </div>
+          <a class="link" href="${item.link}" target="_blank" rel="noopener">Leer</a>
+        </div>
+      `
+        )
+        .join("");
+      dom.cryptoPressList.innerHTML = `${hint}${list}`;
       return;
     }
     const list = officialItems
@@ -782,6 +1008,51 @@ async function loadCryptoPress() {
       .join("");
     dom.cryptoPressList.innerHTML = list;
   } catch (error) {
+    const cached = readListCache(CRYPTO_PRESS_STORAGE_KEY);
+    if (cached.length) {
+      const officialItems = cached.filter((item) => item.official === true);
+      const fallbackItems = cached.filter((item) => item.fallback === true);
+      if (!officialItems.length) {
+        if (!fallbackItems.length) {
+          dom.cryptoPressList.innerHTML = "<div class=\"empty\">Sin NDP oficiales.</div>";
+          return;
+        }
+        const hint =
+          "<div class=\"list-hint\">Sin NDP oficiales; mostrando ultima noticia por ticker (no oficial).</div>";
+        const list = fallbackItems
+          .map(
+            (item) => `
+        <div class="list-item">
+          <div>
+            <div class="list-title">${getTranslatedTitle(item, "Nota de prensa")}</div>
+            <div class="list-meta">${[item.symbol, item.date].filter(Boolean).join(" · ")}</div>
+            <div class="list-meta">No oficial (solo comprobacion)</div>
+          </div>
+          <a class="link" href="${item.link}" target="_blank" rel="noopener">Leer</a>
+        </div>
+      `
+          )
+          .join("");
+        dom.cryptoPressList.innerHTML = `${hint}${list}`;
+        return;
+      }
+      const list = officialItems
+        .map(
+          (item) => `
+        <div class="list-item">
+          <div>
+            <div class="list-title">${getTranslatedTitle(item, "Nota de prensa")}</div>
+            <div class="list-meta">${[item.symbol, item.date].filter(Boolean).join(" · ")}</div>
+            <div class="list-meta">Fuente oficial: ${item.source || "N/D"}</div>
+          </div>
+          <a class="link" href="${item.link}" target="_blank" rel="noopener">Leer</a>
+        </div>
+      `
+        )
+        .join("");
+      dom.cryptoPressList.innerHTML = list;
+      return;
+    }
     dom.cryptoPressList.innerHTML = `<div class="empty">${error.message}</div>`;
   }
 }
@@ -790,7 +1061,11 @@ async function loadCryptoNews() {
   if (!dom.cryptoNewsList) return;
   dom.cryptoNewsList.innerHTML = "<div class=\"empty\">Cargando noticias cripto...</div>";
   try {
-    const items = await fetchCryptoNews();
+    const items = mergeCachedItems(
+      CRYPTO_NEWS_STORAGE_KEY,
+      await fetchCryptoNews(),
+      LIST_CACHE_LIMIT
+    );
     if (!items.length) {
       dom.cryptoNewsList.innerHTML =
         "<div class=\"empty\">Sin noticias cripto recientes.</div>";
@@ -817,6 +1092,30 @@ async function loadCryptoNews() {
       })
       .join("");
   } catch (error) {
+    const cached = readListCache(CRYPTO_NEWS_STORAGE_KEY);
+    if (cached.length) {
+      dom.cryptoNewsList.innerHTML = cached
+        .map((item) => {
+          const classification = formatClassification(item.classification);
+          const impact = formatImpact(item.impact);
+          const ignore = formatIgnoreFlag(item.ignore);
+          const reason = normalizeText(item.reason, "Sin datos verificables");
+          const symbol = formatCryptoNewsSymbol(item.symbol);
+          return `
+        <div class="list-item">
+          <div>
+            <div class="list-title">${getTranslatedTitle(item, "Noticia")}</div>
+            <div class="list-meta">${[symbol, item.date].filter(Boolean).join(" · ")}</div>
+            <div class="list-meta">Clasificacion: ${classification} · Impacto: ${impact} · ${ignore}</div>
+            <div class="list-meta">Motivo: ${reason}</div>
+          </div>
+          <a class="link" href="${item.link}" target="_blank" rel="noopener">Leer</a>
+        </div>
+      `;
+        })
+        .join("");
+      return;
+    }
     dom.cryptoNewsList.innerHTML = `<div class="empty">${error.message}</div>`;
   }
 }
@@ -877,6 +1176,7 @@ async function updateStocks() {
       const updatedAtMs = Number.isFinite(item.updatedAt)
         ? item.updatedAt * 1000
         : Date.now();
+      const session = resolveMarketState(item.marketState, updatedAtMs);
       recordHistory(symbol, price, updatedAtMs);
       const series = getSeries(symbol);
       const rsi = calculateRSI(series);
@@ -888,7 +1188,7 @@ async function updateStocks() {
         price,
         change,
         changePercent,
-        session: item.marketState,
+        session,
         updatedAt: updatedAtMs,
       });
       updateRow(row, {
@@ -898,7 +1198,7 @@ async function updateStocks() {
         rsi,
         macd: macdData.macd,
         signal: macdData.signal,
-        session: item.marketState,
+        session,
         updatedAt,
       });
       okCount += 1;

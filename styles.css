@@ -11,6 +11,7 @@
   --up: #0d8b5f;
   --down: #c9472d;
   --shadow: 0 20px 50px rgba(24, 28, 33, 0.12);
+  --list-height: 320px;
 }
 
 * {
@@ -325,6 +326,7 @@ h1 {
 
 .grid.secondary {
   margin-top: 26px;
+  align-items: start;
 }
 
 .alert-form {
@@ -338,6 +340,28 @@ h1 {
 .list {
   display: grid;
   gap: 10px;
+}
+
+.list.scrollable {
+  max-height: var(--list-height);
+  overflow-y: auto;
+  padding-right: 6px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(10, 127, 90, 0.35) transparent;
+}
+
+.list.scrollable::-webkit-scrollbar {
+  width: 8px;
+}
+
+.list.scrollable::-webkit-scrollbar-thumb {
+  background: rgba(10, 127, 90, 0.25);
+  border-radius: 999px;
+}
+
+.list.scrollable::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.4);
+  border-radius: 999px;
 }
 
 .list-item {
@@ -455,6 +479,9 @@ h1 {
 }
 
 @media (max-width: 900px) {
+  :root {
+    --list-height: 260px;
+  }
   .hero {
     flex-direction: column;
   }
@@ -512,6 +539,10 @@ h1 {
 }
 
 @media (max-width: 600px) {
+  :root {
+    --list-height: 220px;
+  }
+
   .card {
     padding: 16px;
   }
