@@ -16,8 +16,8 @@ const CRYPTOS = [
   "BTC/USDT",
   "XRP/USDT",
   "ADA/USDT",
-  "SOL/USDT",
   "HBAR/USDT",
+  "XLM/USDT",
 ];
 
 const dom = {
