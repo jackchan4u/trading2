@@ -905,7 +905,7 @@ async function updateStocks() {
     });
 
     setStatus(dom.stockStatus, `Acciones: ${okCount}/${STOCKS.length}`);
-    if (payload.meta?.error) {
+    if (payload.meta && payload.meta.error) {
       setStatus(
         dom.stockStatus,
         `Acciones: ${okCount}/${STOCKS.length} · ${payload.meta.error}`
@@ -915,7 +915,7 @@ async function updateStocks() {
     applyFilter("stocks");
     evaluateAlerts();
   } catch (error) {
-    const message = error?.message || "Error API";
+    const message = (error && error.message) ? error.message : "Error API";
     setStatus(dom.stockStatus, `Acciones: ${message}`);
     STOCKS.forEach((symbol) => {
       const row = stockRows.get(symbol);
@@ -1032,8 +1032,10 @@ function init() {
   }
   if (dom.alertsList) {
     dom.alertsList.addEventListener("click", (event) => {
-      const action = event.target?.dataset?.action;
-      const id = event.target?.dataset?.id;
+      const target = event.target;
+      const dataset = target && target.dataset ? target.dataset : null;
+      const action = dataset ? dataset.action : null;
+      const id = dataset ? dataset.id : null;
       if (!action || !id) return;
       if (action === "remove") removeAlert(id);
       if (action === "reset") resetAlert(id);
