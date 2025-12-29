@@ -139,6 +139,17 @@ function formatChange(change, percent) {
   return `${sign}${change.toFixed(2)}${pct}`;
 }
 
+function normalizeChangePercent(changePercent, price, change) {
+  if (!Number.isFinite(price) || !Number.isFinite(change)) {
+    return Number.isFinite(changePercent) ? changePercent : null;
+  }
+  const base = price - change;
+  if (!Number.isFinite(base) || base === 0) {
+    return Number.isFinite(changePercent) ? changePercent : null;
+  }
+  return (change / base) * 100;
+}
+
 async function updateMobileLink() {
   if (!dom.openMobileLink || !dom.mobileUrl) return;
   const fallbackUrl = window.location.origin;
@@ -1322,7 +1333,11 @@ async function updateStocks() {
       }
       const price = Number(item.price);
       const change = Number(item.change);
-      const changePercent = Number(item.changePercent);
+      const changePercent = normalizeChangePercent(
+        Number(item.changePercent),
+        price,
+        change
+      );
       if (!Number.isFinite(price)) {
         updateRow(row, { error: "Sin datos" });
         return;
@@ -1402,17 +1417,23 @@ async function updateCryptos() {
       const rsi = calculateRSI(series);
       const macdData = calculateMACD(series) || {};
 
+      const changeValue = Number(item.priceChange);
+      const changePercent = normalizeChangePercent(
+        Number(item.priceChangePercent),
+        price,
+        changeValue
+      );
       latestCryptos.set(pair.label, {
         symbol: pair.label,
         price,
-        change: Number(item.priceChange),
-        changePercent: Number(item.priceChangePercent),
+        change: changeValue,
+        changePercent,
         updatedAt: updatedAtMs,
       });
       updateRow(row, {
         price,
-        change: Number(item.priceChange),
-        changePercent: Number(item.priceChangePercent),
+        change: changeValue,
+        changePercent: Number.isFinite(changePercent) ? changePercent : 0,
         rsi,
         macd: macdData.macd,
         signal: macdData.signal,
