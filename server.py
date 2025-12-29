@@ -3018,9 +3018,9 @@ def _fetch_stooq_quote(symbol, previous_price=None):
         return None
     price = parsed["price"]
     change = None
-    base = previous_price
+    base = parsed["open"] if parsed["open"] is not None else parsed["close"]
     if base is None:
-        base = parsed["open"] if parsed["open"] is not None else parsed["close"]
+        base = previous_price
     if base is not None:
         change = price - base
     change_percent = None
@@ -3248,6 +3248,14 @@ def fetch_quotes(symbols, api_key):
             continue
         change = _to_float(item.get("change"))
         change_percent = _to_float(item.get("percent_change"))
+        previous_close = _to_float(
+            item.get("previous_close")
+            or item.get("prev_close")
+            or item.get("previousClose")
+        )
+        if previous_close is not None and previous_close != 0:
+            change = price - previous_close
+            change_percent = (change / previous_close) * 100
         is_open = _normalize_state(item.get("is_market_open"))
         market_state = "open" if is_open else state
         results[symbol] = {
