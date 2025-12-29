@@ -50,6 +50,7 @@ const MIN_STOCK_INTERVAL_SEC = 120;
 const MAX_HISTORY_POINTS = 300;
 const HISTORY_STORAGE_KEY = "priceHistoryV1";
 const ALERTS_STORAGE_KEY = "priceAlertsV1";
+const FILINGS_SEEN_KEY = "filingsSeenV2";
 const FILINGS_REFRESH_MS = 5 * 60 * 1000;
 const NEWS_REFRESH_MS = 3 * 60 * 1000;
 const PRESS_REFRESH_MS = 6 * 60 * 1000;
@@ -60,7 +61,7 @@ const MARKET_STATE_STALE_MS = 15 * 60 * 1000;
 const LIST_CACHE_LIMIT = 60;
 const PRESS_STORAGE_KEY = "pressCacheV1";
 const NEWS_STORAGE_KEY = "newsCacheV1";
-const FILINGS_STORAGE_KEY = "filingsCacheV1";
+const FILINGS_STORAGE_KEY = "filingsCacheV2";
 const CRYPTO_NEWS_STORAGE_KEY = "cryptoNewsCacheV1";
 const CRYPTO_PRESS_STORAGE_KEY = "cryptoPressCacheV1";
 
@@ -203,6 +204,51 @@ function formatDateTime(timestamp) {
   });
 }
 
+function formatImpactLevel(value) {
+  if (!value) return "desconocido";
+  return String(value);
+}
+
+function formatShares(value) {
+  if (!Number.isFinite(value)) return "--";
+  const formatter = new Intl.NumberFormat("en-US", {
+    maximumFractionDigits: 0,
+  });
+  return formatter.format(value);
+}
+
+function formatValue(value) {
+  if (!Number.isFinite(value)) return "--";
+  return formatUsd.format(value);
+}
+
+function formatDilutive(value) {
+  if (value === true) return "si";
+  if (value === false) return "no";
+  return normalizeText(value, "desconocido");
+}
+
+function loadSeenFilings() {
+  try {
+    const raw = localStorage.getItem(FILINGS_SEEN_KEY);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(parsed);
+  } catch (error) {
+    return new Set();
+  }
+}
+
+function saveSeenFilings(seen) {
+  try {
+    const values = Array.from(seen).slice(-200);
+    localStorage.setItem(FILINGS_SEEN_KEY, JSON.stringify(values));
+  } catch (error) {
+    return;
+  }
+}
+
 function getLocalMarketState() {
   if (typeof Intl === "undefined" || !Intl.DateTimeFormat) return null;
   const formatter = new Intl.DateTimeFormat("en-US", {
@@ -242,7 +288,7 @@ function resolveMarketState(serverState, updatedAtMs) {
 
 function buildItemId(item) {
   if (!item || typeof item !== "object") return "";
-  if (item.link) return String(item.link);
+  if (item.link || item.url) return String(item.link || item.url);
   const fallback = [item.symbol, item.form, item.title, item.date]
     .filter(Boolean)
     .join("|");
@@ -748,44 +794,153 @@ async function loadFilings() {
       dom.filingsList.innerHTML = "<div class=\"empty\">Sin informes recientes.</div>";
       return;
     }
+    const seen = loadSeenFilings();
+    const nextSeen = new Set(seen);
     dom.filingsList.innerHTML = items
       .map(
         (item) => {
-          const impact = formatImpact(item.impact);
-          const thesis = normalizeText(item.thesis, "no determinable");
-          const summary = normalizeText(item.summary, "Sin datos verificables");
-          const what = normalizeText(item.whatHappened, "No hay datos verificables");
+          const impact = formatImpactLevel(item.impact);
+          const eventType = normalizeText(
+            item.eventType || item.event_type,
+            "sin clasificar"
+          );
+          const insider = normalizeText(
+            item.insiderRole || item.insider_role || item.insiderAction,
+            "no aplica"
+          );
+          const sharesValue = (item.shares === null || item.shares === undefined)
+            ? NaN
+            : Number(item.shares);
+          const valueSource = item.value_usd !== undefined ? item.value_usd : item.value;
+          const valueAmount = (valueSource === null || valueSource === undefined)
+            ? NaN
+            : Number(valueSource);
+          const shares = formatShares(sharesValue);
+          const value = formatValue(valueAmount);
+          const dilutive = formatDilutive(item.dilutive);
+          const priceValue = item.price !== undefined ? item.price : item.price_avg;
+          const priceLine = Number.isFinite(Number(priceValue))
+            ? `<div class="list-meta">Precio medio: <span class="meta-value">${formatPrice(Number(priceValue))}</span></div>`
+            : "";
+          const transactionType = normalizeText(
+            item.transaction_type || item.transactionType,
+            ""
+          );
+          const summary = normalizeText(item.summary, "");
+          const error = item.documentError;
+          const id = buildItemId(item);
+          const isNew = id ? !seen.has(id) : false;
+          if (id) nextSeen.add(id);
+          const title = item.form || item.form_type || "Informe";
+          const badge = isNew ? "<span class=\"tag tag--new\">Nuevo</span>" : "";
+          const url = item.link || item.url || "";
+          const summaryLine = summary && !error
+            ? `<div class="list-meta">Resumen: <span class="meta-value">${summary}</span></div>`
+            : "";
+          const errorLine = error
+            ? `<div class="list-meta error">Error tecnico: ${error}</div>`
+            : "";
+          const insiderLine = insider !== "no aplica"
+            ? `<div class="list-meta">Insider: <span class="meta-value">${insider}</span></div>`
+            : "";
+          const txnLine = transactionType
+            ? `<div class="list-meta">Tipo: <span class="meta-value">${transactionType}</span></div>`
+            : "";
           return `
         <div class="list-item">
           <div>
-            <div class="list-title">${item.form || "Informe"}</div>
-            <div class="list-meta">${[item.symbol, item.date].filter(Boolean).join(" · ")}</div>
-            <div class="list-meta">Impacto: ${impact} · Tesis: ${thesis}</div>
-            <div class="list-meta">Resumen: ${summary}</div>
-            <div class="list-meta">Que paso: ${what}</div>
+            <div class="list-title">${title} ${badge}</div>
+            <div class="list-meta">${[item.symbol || item.ticker, item.date].filter(Boolean).join(" · ")}</div>
+            <div class="list-meta">Evento: <span class="meta-value">${eventType}</span> · Impacto: <span class="meta-value">${impact}</span></div>
+            ${insiderLine}
+            <div class="list-meta">Acciones: <span class="meta-value">${shares}</span> · Valor: <span class="meta-value">${value}</span> · Dilutivo: <span class="meta-value">${dilutive}</span></div>
+            ${priceLine}
+            ${txnLine}
+            ${summaryLine}
+            ${errorLine}
           </div>
-          <a class="link" href="${item.link}" target="_blank" rel="noopener">Ver</a>
+          <a class="link" href="${url}" target="_blank" rel="noopener">Ver</a>
         </div>
       `;
         }
       )
       .join("");
+    saveSeenFilings(nextSeen);
   } catch (error) {
     const cached = readListCache(FILINGS_STORAGE_KEY);
     if (cached.length) {
+      const seen = loadSeenFilings();
+      const nextSeen = new Set(seen);
       dom.filingsList.innerHTML = cached
         .map(
-          (item) => `
+          (item) => {
+            const impact = formatImpactLevel(item.impact);
+            const eventType = normalizeText(
+              item.eventType || item.event_type,
+              "sin clasificar"
+            );
+            const insider = normalizeText(
+              item.insiderRole || item.insider_role || item.insiderAction,
+              "no aplica"
+            );
+            const sharesValue = (item.shares === null || item.shares === undefined)
+              ? NaN
+              : Number(item.shares);
+            const valueSource = item.value_usd !== undefined ? item.value_usd : item.value;
+            const valueAmount = (valueSource === null || valueSource === undefined)
+              ? NaN
+              : Number(valueSource);
+            const shares = formatShares(sharesValue);
+            const value = formatValue(valueAmount);
+            const dilutive = formatDilutive(item.dilutive);
+            const priceValue = item.price !== undefined ? item.price : item.price_avg;
+            const priceLine = Number.isFinite(Number(priceValue))
+              ? `<div class="list-meta">Precio medio: <span class="meta-value">${formatPrice(Number(priceValue))}</span></div>`
+              : "";
+            const transactionType = normalizeText(
+              item.transaction_type || item.transactionType,
+              ""
+            );
+            const summary = normalizeText(item.summary, "");
+            const errorMessage = item.documentError;
+            const id = buildItemId(item);
+            const isNew = id ? !seen.has(id) : false;
+            if (id) nextSeen.add(id);
+            const title = item.form || item.form_type || "Informe";
+            const badge = isNew ? "<span class=\"tag tag--new\">Nuevo</span>" : "";
+            const url = item.link || item.url || "";
+            const summaryLine = summary && !errorMessage
+              ? `<div class="list-meta">Resumen: <span class="meta-value">${summary}</span></div>`
+              : "";
+            const errorLine = errorMessage
+              ? `<div class="list-meta error">Error tecnico: ${errorMessage}</div>`
+              : "";
+            const insiderLine = insider !== "no aplica"
+              ? `<div class="list-meta">Insider: <span class="meta-value">${insider}</span></div>`
+              : "";
+            const txnLine = transactionType
+              ? `<div class="list-meta">Tipo: <span class="meta-value">${transactionType}</span></div>`
+              : "";
+            return `
         <div class="list-item">
           <div>
-            <div class="list-title">${item.form || "Informe"}</div>
-            <div class="list-meta">${[item.symbol, item.date].filter(Boolean).join(" · ")}</div>
+            <div class="list-title">${title} ${badge}</div>
+            <div class="list-meta">${[item.symbol || item.ticker, item.date].filter(Boolean).join(" · ")}</div>
+            <div class="list-meta">Evento: <span class="meta-value">${eventType}</span> · Impacto: <span class="meta-value">${impact}</span></div>
+            ${insiderLine}
+            <div class="list-meta">Acciones: <span class="meta-value">${shares}</span> · Valor: <span class="meta-value">${value}</span> · Dilutivo: <span class="meta-value">${dilutive}</span></div>
+            ${priceLine}
+            ${txnLine}
+            ${summaryLine}
+            ${errorLine}
           </div>
-          <a class="link" href="${item.link}" target="_blank" rel="noopener">Ver</a>
+          <a class="link" href="${url}" target="_blank" rel="noopener">Ver</a>
         </div>
       `
+          }
         )
         .join("");
+      saveSeenFilings(nextSeen);
       return;
     }
     dom.filingsList.innerHTML = `<div class="empty">${error.message}</div>`;

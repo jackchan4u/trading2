@@ -66,6 +66,24 @@ PRESS_LIMIT = 12
 NEWS_FETCH_LIMIT = max(1, int(os.environ.get("NEWS_FETCH_LIMIT", "30")))
 NEWS_PER_SYMBOL_LIMIT = max(1, int(os.environ.get("NEWS_PER_SYMBOL_LIMIT", "6")))
 FILINGS_LIMIT = 12
+FILINGS_PER_SYMBOL_LIMIT = max(
+    1, int(os.environ.get("FILINGS_PER_SYMBOL_LIMIT", "6"))
+)
+FILINGS_CACHE_PATH = os.environ.get(
+    "FILINGS_CACHE_PATH", os.path.join(os.path.dirname(__file__), "filings_cache.json")
+)
+FILINGS_CACHE_MAX = max(1, int(os.environ.get("FILINGS_CACHE_MAX", "500")))
+FILINGS_CACHE_VERSION = "v12"
+TARGET_FILING_FORMS = {
+    "8-K",
+    "8-K/A",
+    "10-K",
+    "10-K/A",
+    "4",
+    "4/A",
+    "144",
+    "144/A",
+}
 STOOQ_URL = "https://stooq.com/q/l/?s={symbol}&f=sd2t2ohlcv&h&e=csv"
 KNOWN_CIKS = {
     "NVDA": "0001045810",
@@ -114,6 +132,7 @@ ANALYSIS_CACHE_TTL = 60 * 60 * 12
 MAX_FILING_TEXT_CHARS = 6000
 _analysis_cache = {}
 _filing_text_cache = {}
+_processed_filings_cache = None
 
 
 def load_config():
@@ -626,46 +645,1313 @@ def _filing_text_cache_get(link):
     if (time.time() - cached["time"]) >= ANALYSIS_CACHE_TTL:
         del _filing_text_cache[link]
         return None
-    return cached["text"]
+    return {
+        "text": cached.get("text", ""),
+        "error": cached.get("error", ""),
+    }
 
 
-def _filing_text_cache_set(link, text):
-    _filing_text_cache[link] = {"time": time.time(), "text": text}
+def _filing_text_cache_set(link, text, error=""):
+    _filing_text_cache[link] = {
+        "time": time.time(),
+        "text": text,
+        "error": error,
+    }
+
+
+def _load_processed_filings_cache():
+    global _processed_filings_cache
+    if _processed_filings_cache is not None:
+        return _processed_filings_cache
+    try:
+        with open(FILINGS_CACHE_PATH, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        if isinstance(data, dict):
+            _processed_filings_cache = data
+        else:
+            _processed_filings_cache = {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        _processed_filings_cache = {}
+    return _processed_filings_cache
+
+
+def _save_processed_filings_cache():
+    cache = _load_processed_filings_cache()
+    if len(cache) > FILINGS_CACHE_MAX:
+        items = sorted(
+            cache.items(),
+            key=lambda entry: entry[1].get("processedAt", 0),
+            reverse=True,
+        )[:FILINGS_CACHE_MAX]
+        cache = dict(items)
+        _processed_filings_cache.clear()
+        _processed_filings_cache.update(cache)
+    try:
+        with open(FILINGS_CACHE_PATH, "w", encoding="utf-8") as handle:
+            json.dump(cache, handle, ensure_ascii=True)
+    except OSError:
+        return
+
+
+def _get_processed_filing(link):
+    if not link:
+        return None
+    cache = _load_processed_filings_cache()
+    entry = cache.get(link)
+    if not isinstance(entry, dict):
+        return None
+    if entry.get("cacheVersion") != FILINGS_CACHE_VERSION:
+        return None
+    return entry
+
+
+def _set_processed_filing(link, payload):
+    if not link:
+        return
+    cache = _load_processed_filings_cache()
+    payload["cacheVersion"] = FILINGS_CACHE_VERSION
+    cache[link] = payload
+    _save_processed_filings_cache()
+
+
+def _fetch_filing_payload(link):
+    if not link:
+        return "", "Falta la URL del filing."
+    try:
+        headers = _sec_headers()
+    except Exception as exc:
+        error = str(exc) or "No se pudo configurar el User-Agent para SEC."
+        return "", error
+    headers["Accept"] = "text/html,application/xml,text/xml,text/plain"
+    try:
+        request_obj = urllib.request.Request(link, headers=headers)
+        with urllib.request.urlopen(request_obj, timeout=8) as response:
+            raw = response.read()
+            charset = response.headers.get_content_charset() or "utf-8"
+            try:
+                payload = raw.decode(charset)
+            except (LookupError, UnicodeDecodeError):
+                payload = raw.decode("utf-8", errors="replace")
+    except Exception as exc:
+        return "", f"Error descargando el filing: {exc}"
+    if not payload:
+        return "", "Documento vacio o no legible."
+    return payload, ""
 
 
 def _fetch_filing_text(link):
     if not link:
-        return ""
+        return "", "Falta la URL del filing."
     cached = _filing_text_cache_get(link)
     if cached is not None:
-        return cached
-    try:
-        headers = _sec_headers()
-    except Exception:
-        _filing_text_cache_set(link, "")
-        return ""
-    headers["Accept"] = "text/html"
-    try:
-        payload = _fetch_text(link, headers)
-    except Exception:
-        _filing_text_cache_set(link, "")
-        return ""
+        return cached["text"], cached.get("error", "")
+    payload, error = _fetch_filing_payload(link)
+    if error:
+        _filing_text_cache_set(link, "", error)
+        return "", error
     text = _strip_html(payload)
     if len(text) > MAX_FILING_TEXT_CHARS:
         text = text[:MAX_FILING_TEXT_CHARS]
-    _filing_text_cache_set(link, text)
-    return text
+    if not text:
+        error = "Documento vacio o no legible."
+        _filing_text_cache_set(link, "", error)
+        return "", error
+    _filing_text_cache_set(link, text, "")
+    return text, ""
 
 
 def _analysis_key(kind, item):
     link = item.get("link") or ""
     if link:
+        if kind == "filing":
+            return (kind, "v2", link)
         return (kind, link)
     title = item.get("title") or ""
     date = item.get("date") or ""
     symbol = item.get("symbol") or ""
     form = item.get("form") or ""
+    if kind == "filing":
+        return (kind, "v2", title, date, symbol, form)
     return (kind, title, date, symbol, form)
+
+
+def _is_target_filing_form(form):
+    if not form:
+        return False
+    return str(form).strip().upper() in TARGET_FILING_FORMS
+
+
+def _extract_first_number(pattern, text):
+    if not text:
+        return None
+    match = re.search(pattern, text, re.IGNORECASE)
+    if not match:
+        return None
+    raw = match.group(1)
+    raw = raw.replace(",", "")
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    return int(value) if value.is_integer() else value
+
+
+def _infer_event_type(form, text):
+    form = (form or "").strip().upper()
+    if form.startswith("4"):
+        return "Transaccion insider (Form 4)"
+    if form.startswith("144"):
+        return "Aviso de venta (Form 144)"
+    text_lower = (text or "").lower()
+    candidates = [
+        ("Resultados financieros", ["results of operations", "earnings release", "financial results"]),
+        ("Contrato material", ["material definitive agreement", "definitive agreement"]),
+        ("Financiacion", ["credit agreement", "notes", "financing", "loan agreement", "at-the-market"]),
+        ("M&A", ["acquisition", "merger", "combination", "purchase agreement"]),
+        ("Reestructuracion", ["bankruptcy", "restructuring", "insolvency"]),
+        ("Listado", ["delisting", "listing", "nasdaq", "nyse", "notice of suspension"]),
+    ]
+    for label, keywords in candidates:
+        if any(keyword in text_lower for keyword in keywords):
+            return label
+    return "Evento corporativo (8-K)"
+
+
+def _infer_insider_action(form, text):
+    form = (form or "").strip().upper()
+    if not (form.startswith("4") or form.startswith("144")):
+        return "no aplica"
+    text_lower = (text or "").lower()
+    buy_terms = ("purchase", "acquired", "buy", "bought")
+    sell_terms = ("sale", "sold", "dispose", "disposed")
+    has_buy = any(term in text_lower for term in buy_terms)
+    has_sell = any(term in text_lower for term in sell_terms)
+    if has_buy and has_sell:
+        return "mixto"
+    if has_buy:
+        return "compra"
+    if has_sell:
+        return "venta"
+    return "desconocido"
+
+
+def _infer_dilutive(form, text):
+    form = (form or "").strip().upper()
+    if form.startswith("4") or form.startswith("144"):
+        return "no"
+    text_lower = (text or "").lower()
+    dilutive_terms = (
+        "dilution",
+        "dilutive",
+        "equity offering",
+        "common stock",
+        "issuance of shares",
+        "registered offering",
+        "private placement",
+    )
+    if any(term in text_lower for term in dilutive_terms):
+        return "si"
+    return "desconocido"
+
+
+def _fallback_filing_analysis(item, content):
+    symbol = item.get("symbol") or ""
+    form = item.get("form") or ""
+    date = item.get("date") or ""
+    event_type = _infer_event_type(form, content)
+    insider_action = _infer_insider_action(form, content)
+    shares = _extract_first_number(r"([0-9][0-9,\\.]+)\\s+shares", content)
+    value = _extract_first_number(r"\\$\\s*([0-9][0-9,\\.]+)", content)
+    dilutive = _infer_dilutive(form, content)
+    impact = "bajo"
+    if event_type in ("M&A", "Financiacion", "Reestructuracion"):
+        impact = "alto"
+    elif event_type in ("Resultados financieros", "Contrato material"):
+        impact = "medio"
+    summary = f"{symbol} presento {form} el {date}. Evento: {event_type}."
+    if insider_action not in ("no aplica", "desconocido"):
+        summary = f"{summary} Insider: {insider_action}."
+    return {
+        "summary": summary.strip(),
+        "impact": impact,
+        "eventType": event_type,
+        "insiderAction": insider_action,
+        "shares": shares,
+        "value": value,
+        "dilutive": dilutive,
+    }
+
+
+def _strip_xml_ns(tag):
+    return tag.split("}", 1)[-1] if "}" in tag else tag
+
+
+def _xml_bool(value):
+    return str(value).strip().lower() in ("1", "true", "yes")
+
+
+def _build_xml_text_map(root):
+    mapping = {}
+    for elem in root.iter():
+        tag = _strip_xml_ns(elem.tag).lower()
+        text = (elem.text or "").strip()
+        if not text:
+            continue
+        mapping.setdefault(tag, []).append(text)
+    return mapping
+
+
+def _xml_first_text(mapping, candidates):
+    for name in candidates:
+        values = mapping.get(name.lower())
+        if values:
+            return values[0]
+    return ""
+
+
+def _xml_value_in(node, parent_tag):
+    target = parent_tag.lower()
+    for parent in node.iter():
+        if _strip_xml_ns(parent.tag).lower() == target:
+            for child in parent.iter():
+                if _strip_xml_ns(child.tag).lower() == "value":
+                    if child.text and child.text.strip():
+                        return child.text.strip()
+    return ""
+
+
+def _parse_number_value(value):
+    if value is None:
+        return None
+    text = str(value)
+    match = re.search(r"-?\d[\d,]*\.?\d*", text)
+    if not match:
+        return None
+    cleaned = match.group(0).replace(",", "").strip()
+    if cleaned == "" or cleaned == "-":
+        return None
+    try:
+        num = float(cleaned)
+    except ValueError:
+        return None
+    return int(num) if num.is_integer() else num
+
+
+def _sanitize_xml(payload):
+    return re.sub(
+        r"&(?![a-zA-Z]+;|#\d+;|#x[0-9a-fA-F]+;)",
+        "&amp;",
+        payload,
+    )
+
+
+def _extract_xml_fragment(payload, tag):
+    pattern = rf"(<{tag}\\b[^>]*>.*?</{tag}>)"
+    match = re.search(pattern, payload, re.IGNORECASE | re.DOTALL)
+    if not match:
+        return ""
+    return match.group(1)
+
+
+def _extract_tag_value(payload, tag):
+    pattern = rf"<(?:\\w+:)?{tag}\\b[^>]*>(.*?)</(?:\\w+:)?{tag}>"
+    match = re.search(pattern, payload, re.IGNORECASE | re.DOTALL)
+    if not match:
+        return ""
+    return unescape(match.group(1)).strip()
+
+
+def _extract_open_tag_value(payload, tag):
+    pattern = rf"<(?:\\w+:)?{tag}\\b[^>]*>\\s*([^<]+)"
+    match = re.search(pattern, payload, re.IGNORECASE | re.DOTALL)
+    if not match:
+        return ""
+    return unescape(match.group(1)).strip()
+
+
+def _extract_first_open_tag_value(payload, tags):
+    for tag in tags:
+        value = _extract_open_tag_value(payload, tag)
+        if value:
+            return value
+    return ""
+
+
+def _extract_first_tag_value(payload, tags):
+    for tag in tags:
+        value = _extract_tag_value(payload, tag)
+        if value:
+            return value
+    return ""
+
+
+def _extract_tag_pairs_loose(payload):
+    pairs = re.findall(
+        r"<(?:\\w+:)?([A-Za-z0-9_\\-]+)\\b[^>]*>([^<]+)</(?:\\w+:)?\\1>",
+        payload,
+        re.IGNORECASE | re.DOTALL,
+    )
+    cleaned = []
+    for tag, value in pairs:
+        text = unescape(value).strip()
+        if not text:
+            continue
+        cleaned.append((tag, text))
+    return cleaned
+
+
+def _normalize_tag_key(tag):
+    return re.sub(r"[^a-z0-9]", "", tag.lower())
+
+
+def _pick_tag_value(pairs, substrings):
+    for tag, value in pairs:
+        key = _normalize_tag_key(tag)
+        if any(sub in key for sub in substrings):
+            return value
+    return ""
+
+
+def _safe_parse_xml(payload, tag_candidates):
+    if not payload:
+        return None, "Documento vacio o no legible."
+    try:
+        return ET.fromstring(payload), ""
+    except Exception as exc:
+        last_error = exc
+    candidates = []
+    xml_start = payload.find("<?xml")
+    if xml_start != -1:
+        candidates.append(payload[xml_start:])
+    for tag in tag_candidates:
+        fragment = _extract_xml_fragment(payload, tag)
+        if fragment:
+            candidates.append(fragment)
+    seen = set()
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            return ET.fromstring(candidate), ""
+        except Exception:
+            try:
+                return ET.fromstring(_sanitize_xml(candidate)), ""
+            except Exception:
+                continue
+    return None, f"No se pudo parsear XML: {last_error}"
+
+
+def _extract_number_from_label(text, labels):
+    for label in labels:
+        match = re.search(
+            rf"{label}\\s*[:\\-]?\\s*([$0-9,\\.]+)",
+            text,
+            re.IGNORECASE,
+        )
+        if match:
+            return _parse_number_value(match.group(1))
+    return None
+
+
+def _extract_number_after_label(text, label, window=240):
+    if not text:
+        return None
+    lowered = text.lower()
+    label_lower = label.lower()
+    idx = lowered.find(label_lower)
+    if idx == -1:
+        return None
+    start = idx + len(label)
+    segment = text[start : start + window]
+    match = re.search(r"([$0-9][0-9,.]+)", segment)
+    if not match:
+        return None
+    return _parse_number_value(match.group(1))
+
+
+def _extract_date_after_label(text, label, window=240):
+    if not text:
+        return ""
+    lowered = text.lower()
+    label_lower = label.lower()
+    idx = lowered.find(label_lower)
+    if idx == -1:
+        return ""
+    start = idx + len(label)
+    segment = text[start : start + window]
+    match = re.search(r"(\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}/\d{4})", segment)
+    return match.group(1) if match else ""
+
+
+def _extract_date(text):
+    match = re.search(
+        r"(\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}/\d{4})",
+        text,
+    )
+    return match.group(1) if match else ""
+
+
+def _parse_form4_text(text):
+    normalized = " ".join((text or "").split())
+    if not normalized:
+        return None
+    action = "desconocido"
+    if re.search(r"Acquired\\s+Disposed\\s+Code\\s*A", normalized, re.IGNORECASE):
+        action = "compra"
+    elif re.search(r"Acquired\\s+Disposed\\s+Code\\s*D", normalized, re.IGNORECASE):
+        action = "venta"
+    else:
+        inferred = _infer_insider_action("4", normalized)
+        if inferred in ("compra", "venta", "mixto"):
+            action = inferred
+    shares = _extract_number_from_label(
+        normalized,
+        [
+            "Transaction Shares",
+            "Number of Shares",
+            "Shares",
+            "Amount of Securities",
+        ],
+    )
+    price = _extract_number_from_label(
+        normalized,
+        [
+            "Transaction Price",
+            "Price per Share",
+            "Price",
+        ],
+    )
+    if shares is None:
+        return None
+    txn_type = "desconocido"
+    lowered = normalized.lower()
+    if "open market" in lowered:
+        txn_type = "open market"
+    elif "option exercise" in lowered or "exercise of option" in lowered:
+        txn_type = "option exercise"
+    elif "rsu" in lowered or "restricted stock" in lowered or "award" in lowered:
+        txn_type = "rsu/award"
+    event_type = "Insider buying" if action == "compra" else "Insider selling"
+    summary = f"Form 4: {event_type}. Acciones: {shares}."
+    if price:
+        summary = f"{summary} Precio medio: {price}."
+    return {
+        "event_type": event_type,
+        "insider_action": action,
+        "insider_role": "",
+        "shares": shares,
+        "value_usd": price * shares if price else None,
+        "price": price,
+        "transaction_type": txn_type,
+        "summary": summary,
+        "dilutive": False,
+        "impact": "medio",
+    }
+
+
+def _parse_form4_html_table(payload):
+    if not payload:
+        return []
+    match = re.search(
+        r"Table I - Non-Derivative Securities.*?</table>",
+        payload,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if not match:
+        return []
+    table_html = match.group(0)
+    rows = re.findall(r"<tr[^>]*>(.*?)</tr>", table_html, re.IGNORECASE | re.DOTALL)
+    transactions = []
+    txn_type_map = {
+        "P": "open market",
+        "S": "open market",
+        "M": "option exercise",
+        "A": "RSU/award",
+        "F": "tax/fee",
+        "G": "gift",
+    }
+    for row_html in rows:
+        cells = re.findall(r"<td[^>]*>(.*?)</td>", row_html, re.IGNORECASE | re.DOTALL)
+        if len(cells) < 8:
+            continue
+        values = [_strip_html(cell) for cell in cells]
+        code = values[3].strip().upper()
+        acq_disp = values[6].strip().upper()
+        shares = _parse_number_value(values[5])
+        price = _parse_number_value(values[7].replace("$", ""))
+        if shares is None:
+            continue
+        action = ""
+        if acq_disp == "A":
+            action = "buy"
+        elif acq_disp == "D":
+            action = "sell"
+        elif code in ("P", "M", "A"):
+            action = "buy"
+        elif code in ("S", "F", "D", "G"):
+            action = "sell"
+        transactions.append(
+            {
+                "action": action or "desconocido",
+                "shares": shares,
+                "price": price,
+                "type": txn_type_map.get(code, "desconocido"),
+            }
+        )
+    return transactions
+
+
+def _extract_form4_role(text):
+    if not text:
+        return ""
+    roles = []
+    if re.search(r"X\\s+Director", text, re.IGNORECASE):
+        roles.append("Director")
+    if re.search(r"X\\s+Officer", text, re.IGNORECASE):
+        roles.append("Officer")
+    if re.search(r"X\\s+10%\\s+Owner", text, re.IGNORECASE):
+        roles.append("10% Owner")
+    return ", ".join(roles)
+
+
+def _extract_form144_seller_role(normalized):
+    if not normalized:
+        return "", ""
+    seller = ""
+    seller_match = re.search(
+        r"Name of Person for Whose Account the Securities Are to Be Sold\s*[:\-]?\s*(.+?)(?=Relationship to Issuer|Name of Issuer|Title of the Securities|CUSIP|$)",
+        normalized,
+        re.IGNORECASE,
+    )
+    if seller_match:
+        seller = seller_match.group(1).strip()
+        if "See the definition" in seller:
+            seller = seller.split("See the definition", 1)[0].strip()
+    role_match = re.search(
+        r"Relationship to Issuer\s*[:\-]?\s*(.+?)(?=Name of Issuer|Title of the Securities|CUSIP|$)",
+        normalized,
+        re.IGNORECASE,
+    )
+    role = role_match.group(1).strip() if role_match else ""
+    if role:
+        for cutoff in ("144:", "Securities Information", "Title of the"):
+            if cutoff in role:
+                role = role.split(cutoff, 1)[0].strip()
+                break
+        if "Relationship to Issuer" in role:
+            role = ""
+    if not role:
+        role_parts = []
+        if re.search(r"Relationship to Issuer\s+Director", normalized, re.IGNORECASE) or re.search(r"\bDirector\b", normalized):
+            role_parts.append("Director")
+        if re.search(r"Relationship to Issuer\s+Officer", normalized, re.IGNORECASE) or re.search(r"\bOfficer\b", normalized):
+            role_parts.append("Officer")
+        if re.search(r"10% Stockholder", normalized, re.IGNORECASE):
+            role_parts.append("10% Stockholder")
+        if role_parts:
+            role = ", ".join(role_parts)
+    return seller, role
+
+
+def _parse_form144_text(text):
+    normalized = " ".join((text or "").split())
+    if not normalized:
+        return None
+    seller, role = _extract_form144_seller_role(normalized)
+    shares = _extract_number_from_label(
+        normalized,
+        [
+            "Number of Shares",
+            "Number of Securities",
+            "Aggregate Amount of Securities",
+            "Amount of Securities",
+        ],
+    )
+    shares = shares or _extract_number_after_label(
+        normalized,
+        "Number of Shares or Other Units To Be Sold",
+    )
+    shares = shares or _extract_number_after_label(
+        normalized,
+        "Number of Shares",
+    )
+    value = _extract_number_from_label(
+        normalized,
+        [
+            "Aggregate Market Value",
+            "Approximate Market Value",
+            "Aggregate Sales Price",
+            "Value of Securities",
+        ],
+    )
+    value = value or _extract_number_after_label(
+        normalized,
+        "Aggregate Market Value",
+    )
+    value = value or _extract_number_after_label(
+        normalized,
+        "Approximate Market Value",
+    )
+    date_raw = _extract_date(normalized)
+    if not date_raw:
+        date_raw = _extract_date_after_label(
+            normalized,
+            "Approximate Date of Sale",
+        )
+    if not date_raw:
+        date_raw = _extract_date_after_label(
+            normalized,
+            "Date of Sale",
+        )
+    if not (seller or shares or value or date_raw):
+        return None
+    summary = "Form 144: Insider proposed sale."
+    if seller:
+        summary = f"{summary} Vendedor: {seller}."
+    if shares:
+        summary = f"{summary} Acciones: {shares}."
+    if value:
+        summary = f"{summary} Valor aprox: {value}."
+    if date_raw:
+        summary = f"{summary} Fecha estimada: {date_raw}."
+    return {
+        "event_type": "Insider proposed sale",
+        "insider_action": "venta",
+        "insider_role": role or "",
+        "shares": shares,
+        "value_usd": value,
+        "summary": summary,
+        "dilutive": False,
+        "impact": "medio",
+    }
+
+
+def _parse_form144_html_table(payload):
+    if not payload:
+        return {}
+    header_match = re.search(
+        r"Number of Shares or Other Units To Be Sold",
+        payload,
+        re.IGNORECASE,
+    )
+    if not header_match:
+        return {}
+    after = payload[header_match.start() :]
+    rows = re.findall(
+        r"</tr>\s*<tr[^>]*>(.*?)</tr>",
+        after,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if not rows:
+        return {}
+    total_shares = None
+    total_value = None
+    date_raw = ""
+    for row_html in rows:
+        cells = re.findall(
+            r"<td[^>]*>(.*?)</td>",
+            row_html,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if len(cells) < 6:
+            continue
+        values = [_strip_html(cell) for cell in cells]
+        shares = _parse_number_value(values[2])
+        value = _parse_number_value(values[3])
+        date = _extract_date(values[5]) if len(values) > 5 else ""
+        if shares is not None:
+            total_shares = shares if total_shares is None else total_shares + shares
+        if value is not None:
+            total_value = value if total_value is None else total_value + value
+        if not date_raw and date:
+            date_raw = date
+    return {
+        "shares": total_shares,
+        "value": total_value,
+        "date": date_raw,
+    }
+
+
+def _parse_form4_payload(payload):
+    root, error = _safe_parse_xml(payload, ["ownershipDocument"])
+    if not root:
+        fallback = _parse_form4_text(_strip_html(payload))
+        if fallback:
+            return fallback, ""
+        html_transactions = _parse_form4_html_table(payload)
+        if html_transactions:
+            buy_shares = sum(t["shares"] for t in html_transactions if t["action"] == "buy")
+            sell_shares = sum(t["shares"] for t in html_transactions if t["action"] == "sell")
+            buy_value = sum(
+                (t["shares"] * t["price"])
+                for t in html_transactions
+                if t["action"] == "buy" and t["price"] is not None
+            )
+            sell_value = sum(
+                (t["shares"] * t["price"])
+                for t in html_transactions
+                if t["action"] == "sell" and t["price"] is not None
+            )
+            if buy_shares >= sell_shares:
+                event_type = "Insider buying"
+                shares = buy_shares
+                value = buy_value if buy_value else None
+                avg_price = (buy_value / buy_shares) if buy_shares and buy_value else None
+                action = "compra" if sell_shares == 0 else "mixto"
+            else:
+                event_type = "Insider selling"
+                shares = sell_shares
+                value = sell_value if sell_value else None
+                avg_price = (sell_value / sell_shares) if sell_shares and sell_value else None
+                action = "venta"
+            txn_type = next(
+                (t["type"] for t in html_transactions if t["action"] in ("buy", "sell")),
+                "desconocido",
+            )
+            role = _extract_form4_role(" ".join(_strip_html(payload).split()))
+            summary = f"Form 4: {event_type}."
+            if shares:
+                summary = f"{summary} Acciones: {shares}."
+            if avg_price:
+                summary = f"{summary} Precio medio: {avg_price}."
+            return {
+                "event_type": event_type,
+                "insider_action": action,
+                "insider_role": role,
+                "shares": shares,
+                "value_usd": value,
+                "price": avg_price,
+                "transaction_type": txn_type,
+                "summary": summary,
+                "dilutive": False,
+                "impact": "medio",
+            }, ""
+        return None, error
+    owners = []
+    roles = []
+    for owner in root.iter():
+        if _strip_xml_ns(owner.tag) != "reportingOwner":
+            continue
+        owner_map = _build_xml_text_map(owner)
+        name = _xml_first_text(
+            owner_map,
+            ["reportingownername", "rptownername", "ownername"],
+        )
+        if name:
+            owners.append(name)
+        role_parts = []
+        is_director = _xml_bool(_xml_first_text(owner_map, ["isdirector"]))
+        is_officer = _xml_bool(_xml_first_text(owner_map, ["isofficer"]))
+        is_ten = _xml_bool(_xml_first_text(owner_map, ["istenpercentowner"]))
+        is_other = _xml_bool(_xml_first_text(owner_map, ["isother"]))
+        officer_title = _xml_first_text(owner_map, ["officertitle"])
+        other_text = _xml_first_text(owner_map, ["othertext"])
+        if is_director:
+            role_parts.append("Director")
+        if is_officer:
+            role_parts.append(
+                f"Officer ({officer_title})" if officer_title else "Officer"
+            )
+        if is_ten:
+            role_parts.append("10% Owner")
+        if is_other:
+            role_parts.append(other_text or "Other")
+        if role_parts:
+            roles.append(", ".join(role_parts))
+    transactions = []
+    for txn in root.iter():
+        if _strip_xml_ns(txn.tag) != "nonDerivativeTransaction":
+            continue
+        shares_raw = _xml_value_in(txn, "transactionShares")
+        price_raw = _xml_value_in(txn, "transactionPricePerShare")
+        acq_disp = _xml_value_in(txn, "transactionAcquiredDisposedCode").upper()
+        txn_map = _build_xml_text_map(txn)
+        code = _xml_first_text(txn_map, ["transactioncode"]).upper()
+        shares = _parse_number_value(shares_raw)
+        price = _parse_number_value(price_raw)
+        action = ""
+        if acq_disp == "A":
+            action = "buy"
+        elif acq_disp == "D":
+            action = "sell"
+        elif code in ("P", "M", "A"):
+            action = "buy"
+        elif code in ("S", "F", "D"):
+            action = "sell"
+        txn_type_map = {
+            "P": "open market",
+            "S": "open market",
+            "M": "option exercise",
+            "A": "RSU/award",
+            "F": "tax/fee",
+        }
+        txn_type = txn_type_map.get(code, "desconocido")
+        if shares is None:
+            continue
+        transactions.append(
+            {
+                "action": action or "desconocido",
+                "shares": shares,
+                "price": price,
+                "type": txn_type,
+            }
+        )
+    if not transactions:
+        return None, "No se encontraron transacciones en el Form 4."
+    buy_shares = sum(t["shares"] for t in transactions if t["action"] == "buy")
+    sell_shares = sum(t["shares"] for t in transactions if t["action"] == "sell")
+    buy_value = sum(
+        (t["shares"] * t["price"])
+        for t in transactions
+        if t["action"] == "buy" and t["price"] is not None
+    )
+    sell_value = sum(
+        (t["shares"] * t["price"])
+        for t in transactions
+        if t["action"] == "sell" and t["price"] is not None
+    )
+    if buy_shares >= sell_shares:
+        event_type = "Insider buying"
+        shares = buy_shares
+        value = buy_value if buy_value else None
+        avg_price = (buy_value / buy_shares) if buy_shares and buy_value else None
+        action = "compra" if sell_shares == 0 else "mixto"
+    else:
+        event_type = "Insider selling"
+        shares = sell_shares
+        value = sell_value if sell_value else None
+        avg_price = (sell_value / sell_shares) if sell_shares and sell_value else None
+        action = "venta"
+    txn_type = next(
+        (t["type"] for t in transactions if t["action"] in ("buy", "sell")),
+        "desconocido",
+    )
+    owner_name = owners[0] if owners else ""
+    owner_role = roles[0] if roles else ""
+    summary = f"Form 4: {event_type}."
+    if owner_name:
+        summary = f"{summary} Insider: {owner_name}."
+    if shares:
+        summary = f"{summary} Acciones: {shares}."
+    if avg_price:
+        summary = f"{summary} Precio medio: {avg_price}."
+    return {
+        "event_type": event_type,
+        "insider_action": action,
+        "insider_role": owner_role,
+        "shares": shares,
+        "value_usd": value,
+        "price": avg_price,
+        "transaction_type": txn_type,
+        "summary": summary,
+        "dilutive": False,
+        "impact": "medio",
+    }, ""
+
+
+def _parse_form144_payload(payload):
+    root, error = _safe_parse_xml(payload, ["form144", "edgarSubmission", "document"])
+    if not root:
+        seller = _extract_first_tag_value(
+            payload,
+            [
+                "nameOfPersonForWhoseAccountTheSecuritiesAreToBeSold",
+                "nameOfPersonForWhoseAccountSecuritiesToBeSold",
+                "ownerName",
+                "personName",
+                "reportingOwnerName",
+            ],
+        ) or _extract_first_open_tag_value(
+            payload,
+            [
+                "nameOfPersonForWhoseAccountTheSecuritiesAreToBeSold",
+                "nameOfPersonForWhoseAccountSecuritiesToBeSold",
+                "ownerName",
+                "personName",
+                "reportingOwnerName",
+            ],
+        )
+        role = _extract_first_tag_value(
+            payload,
+            [
+                "relationshipToIssuer",
+                "relationshipOfPersonToIssuer",
+                "relationship",
+                "officerTitle",
+                "title",
+            ],
+        ) or _extract_first_open_tag_value(
+            payload,
+            [
+                "relationshipToIssuer",
+                "relationshipOfPersonToIssuer",
+                "relationship",
+                "officerTitle",
+                "title",
+            ],
+        )
+        shares_raw = _extract_first_tag_value(
+            payload,
+            [
+                "numberOfShares",
+                "numberOfSharesProposedToBeSold",
+                "amountOfSecuritiesToBeSold",
+                "aggregateAmountOfSecuritiesToBeSold",
+            ],
+        ) or _extract_first_open_tag_value(
+            payload,
+            [
+                "numberOfShares",
+                "numberOfSharesProposedToBeSold",
+                "amountOfSecuritiesToBeSold",
+                "aggregateAmountOfSecuritiesToBeSold",
+            ],
+        )
+        value_raw = _extract_first_tag_value(
+            payload,
+            [
+                "aggregateMarketValue",
+                "approximateMarketValue",
+                "aggregateSalesPrice",
+                "valueOfSecurities",
+            ],
+        ) or _extract_first_open_tag_value(
+            payload,
+            [
+                "aggregateMarketValue",
+                "approximateMarketValue",
+                "aggregateSalesPrice",
+                "valueOfSecurities",
+            ],
+        )
+        date_raw = _extract_first_tag_value(
+            payload,
+            [
+                "estimatedDateOfSale",
+                "dateOfSale",
+                "approximateSaleDate",
+            ],
+        ) or _extract_first_open_tag_value(
+            payload,
+            [
+                "estimatedDateOfSale",
+                "dateOfSale",
+                "approximateSaleDate",
+            ],
+        )
+        table_data = _parse_form144_html_table(payload)
+        if not (seller and role):
+            text_normalized = " ".join(_strip_html(payload).split())
+            if text_normalized:
+                text_seller, text_role = _extract_form144_seller_role(text_normalized)
+                seller = seller or text_seller
+                role = role or text_role
+        shares = _parse_number_value(shares_raw)
+        value = _parse_number_value(value_raw)
+        if table_data:
+            shares = shares or table_data.get("shares")
+            value = value or table_data.get("value")
+            date_raw = date_raw or table_data.get("date", "")
+        if not (seller or shares or value or date_raw):
+            pairs = _extract_tag_pairs_loose(payload)
+            if pairs:
+                seller = seller or _pick_tag_value(
+                    pairs,
+                    ["personforwhoseaccount", "ownername", "personname", "reportingowner"],
+                )
+                role = role or _pick_tag_value(
+                    pairs,
+                    ["relationshiptoissuer", "officertitle", "relationship"],
+                )
+                shares = shares or _parse_number_value(
+                    _pick_tag_value(pairs, ["numberofshares", "amountofsecurities", "aggregatesecurities"])
+                )
+                value = value or _parse_number_value(
+                    _pick_tag_value(pairs, ["aggregatemarketvalue", "salesprice", "valueofsecurities"])
+                )
+                date_raw = date_raw or _pick_tag_value(
+                    pairs,
+                    ["estimateddateofsale", "dateofsale", "saledate"],
+                )
+        if seller or shares or value or date_raw:
+            summary = "Form 144: Insider proposed sale."
+            if seller:
+                summary = f"{summary} Vendedor: {seller}."
+            if shares:
+                summary = f"{summary} Acciones: {shares}."
+            if value:
+                summary = f"{summary} Valor aprox: {value}."
+            if date_raw:
+                summary = f"{summary} Fecha estimada: {date_raw}."
+            return {
+                "event_type": "Insider proposed sale",
+                "insider_action": "venta",
+                "insider_role": role or "",
+                "shares": shares,
+                "value_usd": value,
+                "summary": summary,
+                "dilutive": False,
+                "impact": "medio",
+            }, ""
+        fallback = _parse_form144_text(_strip_html(payload))
+        if fallback:
+            return fallback, ""
+        return None, error
+    mapping = _build_xml_text_map(root)
+    seller = _xml_first_text(
+        mapping,
+        [
+            "nameofpersonforwhoseaccountthesecuritiesaretobesold",
+            "nameofpersonforwhoseaccountthesecuritiesaretobesold",
+            "personname",
+            "ownername",
+            "reportingownername",
+        ],
+    )
+    role = _xml_first_text(
+        mapping,
+        [
+            "relationshiptoissuer",
+            "relationshipofpersontissuer",
+            "relationshiptoperson",
+            "relationship",
+            "officertitle",
+            "title",
+        ],
+    )
+    shares_raw = _xml_first_text(
+        mapping,
+        [
+            "numberofshares",
+            "numberofsharesproposedtobesold",
+            "amountofsecuritiestobesold",
+            "aggregateamountofsecuritiestobesold",
+        ],
+    )
+    value_raw = _xml_first_text(
+        mapping,
+        [
+            "aggregatemarketvalue",
+            "approximatemarketvalue",
+            "aggregatesalesprice",
+            "valueofsecurities",
+        ],
+    )
+    date_raw = _xml_first_text(
+        mapping,
+        [
+            "estimateddateofsale",
+            "dateofsale",
+            "approximatesaledate",
+        ],
+    )
+    shares = _parse_number_value(shares_raw)
+    value = _parse_number_value(value_raw)
+    summary = "Form 144: Insider proposed sale."
+    if seller:
+        summary = f"{summary} Vendedor: {seller}."
+    if shares:
+        summary = f"{summary} Acciones: {shares}."
+    if value:
+        summary = f"{summary} Valor aprox: {value}."
+    if date_raw:
+        summary = f"{summary} Fecha estimada: {date_raw}."
+    return {
+        "event_type": "Insider proposed sale",
+        "insider_action": "venta",
+        "insider_role": role or "",
+        "shares": shares,
+        "value_usd": value,
+        "summary": summary,
+        "dilutive": False,
+        "impact": "medio",
+    }, ""
+
+
+def _extract_8k_items(text):
+    if not text:
+        return []
+    matches = re.findall(r"\\bItem\\s+([0-9]{1,2}\\.\\d{2})", text, re.IGNORECASE)
+    items = []
+    for item in matches:
+        normalized = item.strip()
+        if normalized not in items:
+            items.append(normalized)
+    return items
+
+
+def _classify_8k_event(items, text):
+    item_map = {
+        "1.01": "Acuerdo material",
+        "1.02": "Terminacion de acuerdo",
+        "2.01": "M&A",
+        "2.02": "Resultados / guidance",
+        "2.03": "Financiacion",
+        "2.04": "Default o aceleracion",
+        "2.05": "Reestructuracion",
+        "2.06": "Impairment",
+        "3.02": "Venta de acciones",
+        "3.03": "Modificacion de derechos",
+        "5.02": "Cambios en directivos",
+        "7.01": "Divulgacion",
+        "8.01": "Otros eventos",
+    }
+    material_items = {
+        "1.01",
+        "2.01",
+        "2.02",
+        "2.03",
+        "2.04",
+        "2.05",
+        "2.06",
+        "3.02",
+        "3.03",
+        "5.02",
+    }
+    event_type = item_map.get(items[0], "Evento corporativo (8-K)") if items else "Evento corporativo (8-K)"
+    material = any(item in material_items for item in items)
+    text_lower = (text or "").lower()
+    if "guidance" in text_lower and event_type == "Resultados / guidance":
+        event_type = "Resultados / guidance"
+    dilutive = ("equity offering" in text_lower or "registered offering" in text_lower)
+    if "common stock" in text_lower or "private placement" in text_lower:
+        dilutive = True
+    if "item 3.02" in text_lower:
+        dilutive = True
+    impact = "alto" if material else "medio"
+    return event_type, material, dilutive, impact
+
+
+def _parse_8k_payload(text):
+    items = _extract_8k_items(text)
+    event_type, material, dilutive, impact = _classify_8k_event(items, text)
+    shares = _extract_first_number(r"([0-9][0-9,\\.]+)\\s+shares", text)
+    value = _extract_first_number(r"\\$\\s*([0-9][0-9,\\.]+)", text)
+    items_label = ", ".join(items) if items else "N/D"
+    summary = f"8-K Items: {items_label}. Evento: {event_type}."
+    if material:
+        summary = f"{summary} Impacto material: si."
+    return {
+        "event_type": event_type,
+        "insider_action": "no aplica",
+        "insider_role": "",
+        "shares": shares,
+        "value_usd": value,
+        "summary": summary,
+        "dilutive": bool(dilutive),
+        "impact": impact,
+        "items": items,
+        "material": material,
+    }, ""
+
+
+def _extract_10k_items(text):
+    if not text:
+        return []
+    matches = re.findall(
+        r"\\bItem\\s+([0-9]{1,2}[A]?)",
+        text,
+        re.IGNORECASE,
+    )
+    items = []
+    for item in matches:
+        normalized = item.strip().upper()
+        if normalized not in items:
+            items.append(normalized)
+    return items
+
+
+def _parse_10k_payload(text):
+    items = _extract_10k_items(text)
+    items_label = ", ".join(items) if items else "N/D"
+    event_type = "Reporte anual (10-K)"
+    summary = f"10-K Items: {items_label}."
+    return {
+        "event_type": event_type,
+        "insider_action": "no aplica",
+        "insider_role": "",
+        "shares": None,
+        "value_usd": None,
+        "summary": summary,
+        "dilutive": False,
+        "impact": "medio",
+        "items": items,
+    }, ""
+
+
+def _process_filing_item(item):
+    link = item.get("link") or ""
+    cached = _get_processed_filing(link)
+    if cached and (cached.get("event_type") or cached.get("documentError")):
+        return cached
+    symbol = item.get("symbol") or item.get("ticker") or ""
+    form = (item.get("form") or item.get("form_type") or "").strip().upper()
+    date = item.get("date") or ""
+    result = {
+        "ticker": symbol,
+        "symbol": symbol,
+        "form_type": form,
+        "form": form,
+        "event_type": "",
+        "eventType": "",
+        "summary": "",
+        "shares": None,
+        "value_usd": None,
+        "value": None,
+        "insider_role": "",
+        "insiderRole": "",
+        "dilutive": False,
+        "date": date,
+        "link": link,
+        "url": link,
+        "impact": "",
+        "documentError": "",
+    }
+    parsed = None
+    error = ""
+    if form.startswith("4"):
+        payload, error = _fetch_filing_payload(link)
+        if not error:
+            parsed, error = _parse_form4_payload(payload)
+    elif form.startswith("144"):
+        payload, error = _fetch_filing_payload(link)
+        if not error:
+            parsed, error = _parse_form144_payload(payload)
+    elif form.startswith("8-K"):
+        text, error = _fetch_filing_text(link)
+        if not error:
+            parsed, error = _parse_8k_payload(text)
+    elif form.startswith("10-K"):
+        text, error = _fetch_filing_text(link)
+        if not error:
+            parsed, error = _parse_10k_payload(text)
+    else:
+        error = "Form no soportado para procesamiento."
+    if error:
+        result["documentError"] = error
+        result["summary"] = f"Error tecnico: {error}"
+        result["event_type"] = "Error tecnico"
+        result["eventType"] = "Error tecnico"
+        result["impact"] = "bajo"
+    elif parsed:
+        result.update(parsed)
+        result["eventType"] = parsed.get("event_type", "")
+        result["insiderRole"] = parsed.get("insider_role", "")
+        result["insiderAction"] = parsed.get("insider_action", "")
+        result["transactionType"] = parsed.get("transaction_type", "")
+        result["value"] = parsed.get("value_usd")
+    result["timestamp"] = _parse_iso_date(date) or 0
+    result["processedAt"] = time.time()
+    _set_processed_filing(link, result)
+    return result
+
+
+def _process_filings(items):
+    processed = []
+    for item in items:
+        processed.append(_process_filing_item(item))
+    return processed
 
 
 def _apply_news_analysis(items):
@@ -754,103 +2040,9 @@ def _apply_news_analysis(items):
 
 
 def _apply_filings_analysis(items):
-    settings = _get_openai_settings()
-    if not settings or not items:
+    if not items:
         return items
-    pending = []
-    for item in items:
-        key = _analysis_key("filing", item)
-        cached = _analysis_cache_get(key)
-        if cached:
-            item.update(cached)
-        else:
-            pending.append((item, key))
-    if not pending:
-        return items
-    payload_items = []
-    targets = []
-    for item, key in pending:
-        content = _fetch_filing_text(item.get("link"))
-        if not content:
-            result = {
-                "summary": "Sin datos verificables",
-                "whatHappened": "No hay datos verificables",
-                "impact": "bajo",
-                "thesis": "no determinable",
-            }
-            item.update(result)
-            _analysis_cache_set(key, result)
-            continue
-        target_id = len(payload_items)
-        payload_items.append(
-            {
-                "id": target_id,
-                "symbol": item.get("symbol") or "",
-                "form": item.get("form") or "",
-                "date": item.get("date") or "",
-                "link": item.get("link") or "",
-                "content": content,
-            }
-        )
-        targets.append((target_id, item, key))
-    if not payload_items:
-        return items
-    prompt = (
-        "Resume SOLO con el contenido provisto. No inventes. "
-        "Si content esta vacio, usa summary \"Sin datos verificables\" "
-        "y whatHappened \"No hay datos verificables\". "
-        "Devuelve SOLO un JSON array con objetos {id, summary, whatHappened, impact, thesis}. "
-        "impact: \"alto\"|\"medio\"|\"bajo\". "
-        "thesis: \"cambia\"|\"no cambia\"|\"no determinable\"."
-    )
-    payload = {
-        "model": settings["model"],
-        "input": [
-            {
-                "role": "system",
-                "content": [{"type": "text", "text": prompt}],
-            },
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": json.dumps(payload_items, ensure_ascii=True),
-                    }
-                ],
-            },
-        ],
-        "temperature": 0.2,
-        "max_output_tokens": OPENAI_MAX_OUTPUT_TOKENS,
-    }
-    raw = _openai_request(payload, settings)
-    parsed = _parse_json_value(raw)
-    if not isinstance(parsed, list):
-        return items
-    mapped = {}
-    for entry in parsed:
-        if not isinstance(entry, dict):
-            continue
-        entry_id = entry.get("id")
-        if entry_id is None:
-            continue
-        try:
-            entry_index = int(entry_id)
-        except (TypeError, ValueError):
-            continue
-        mapped[entry_index] = {
-            "summary": entry.get("summary"),
-            "whatHappened": entry.get("whatHappened"),
-            "impact": entry.get("impact"),
-            "thesis": entry.get("thesis"),
-        }
-    for target_id, item, key in targets:
-        result = mapped.get(target_id)
-        if not result:
-            continue
-        item.update(result)
-        _analysis_cache_set(key, result)
-    return items
+    return _process_filings(items)
 
 
 def _load_cik_cache():
@@ -924,9 +2116,11 @@ def _get_filings(symbol):
     primary_docs = filings.get("primaryDocument", [])
 
     items = []
-    for idx in range(min(6, len(accession_numbers))):
+    for idx in range(len(accession_numbers)):
         accession = accession_numbers[idx]
         form = forms[idx] if idx < len(forms) else ""
+        if not _is_target_filing_form(form):
+            continue
         date = dates[idx] if idx < len(dates) else ""
         primary = primary_docs[idx] if idx < len(primary_docs) else ""
         accession_no = accession.replace("-", "")
@@ -934,14 +2128,17 @@ def _get_filings(symbol):
         link = f"{base}/{primary}" if primary else f"{base}/{accession}-index.html"
         items.append(
             {
+                "symbol": symbol,
                 "form": form,
                 "date": date,
                 "link": link,
             }
         )
-
-    _filings_cache[symbol] = {"time": time.time(), "data": items}
-    return items
+        if len(items) >= FILINGS_PER_SYMBOL_LIMIT:
+            break
+    processed = _process_filings(items)
+    _filings_cache[symbol] = {"time": time.time(), "data": processed}
+    return processed
 
 
 def _get_news(symbol, limit=None):
@@ -999,17 +2196,7 @@ def _get_filings_stream(symbols):
             entries = _get_filings(symbol)
         except Exception:
             continue
-        for entry in entries:
-            timestamp = _parse_iso_date(entry.get("date"))
-            items.append(
-                {
-                    "form": entry.get("form"),
-                    "date": entry.get("date"),
-                    "link": entry.get("link"),
-                    "symbol": symbol,
-                    "timestamp": timestamp,
-                }
-            )
+        items.extend(entries)
 
     items.sort(key=lambda item: item.get("timestamp") or 0, reverse=True)
     deduped = []
@@ -2166,11 +3353,9 @@ def api_filings():
     try:
         if symbol:
             data = _get_filings(symbol)
-            _apply_filings_analysis(data)
             return jsonify({"symbol": symbol.upper(), "data": data})
         symbols = parse_symbols()
         data = _get_filings_stream(symbols)
-        _apply_filings_analysis(data)
         return jsonify({"data": data})
     except Exception as exc:
         return jsonify({"error": str(exc) or "Error API"}), 502

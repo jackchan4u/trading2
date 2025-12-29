@@ -4,4 +4,5 @@ __pycache__/
 *.pyc
 server.log
 config.json
+filings_cache.json
 bin/
