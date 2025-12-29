@@ -3009,7 +3009,7 @@ def _parse_stooq_csv(payload):
     }
 
 
-def _fetch_stooq_quote(symbol, previous_price=None):
+def _fetch_stooq_quote(symbol, previous_close=None):
     stooq_symbol = f"{symbol.lower()}.us"
     url = STOOQ_URL.format(symbol=urllib.parse.quote(stooq_symbol))
     payload = _fetch_text(url, STOOQ_HEADERS)
@@ -3018,9 +3018,9 @@ def _fetch_stooq_quote(symbol, previous_price=None):
         return None
     price = parsed["price"]
     change = None
-    base = parsed["open"] if parsed["open"] is not None else parsed["close"]
+    base = previous_close
     if base is None:
-        base = previous_price
+        base = parsed["open"] if parsed["open"] is not None else parsed["close"]
     if base is not None:
         change = price - base
     change_percent = None
@@ -3030,6 +3030,7 @@ def _fetch_stooq_quote(symbol, previous_price=None):
         "price": price,
         "change": change,
         "changePercent": change_percent,
+        "previousClose": previous_close,
         "marketState": _market_state(),
     }
 
@@ -3038,11 +3039,11 @@ def fetch_stooq_quotes(symbols):
     results = {}
     for symbol in symbols:
         entry = _symbol_cache.get(symbol)
-        prev_price = None
+        prev_close = None
         if entry and entry.get("data"):
-            prev_price = entry["data"].get("price")
+            prev_close = entry["data"].get("previousClose")
         try:
-            quote = _fetch_stooq_quote(symbol, prev_price)
+            quote = _fetch_stooq_quote(symbol, prev_close)
             if quote:
                 results[symbol] = quote
         except Exception:
@@ -3262,6 +3263,7 @@ def fetch_quotes(symbols, api_key):
             "price": price,
             "change": change,
             "changePercent": change_percent,
+            "previousClose": previous_close,
             "marketState": market_state,
         }
     return results
