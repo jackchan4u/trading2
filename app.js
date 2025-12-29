@@ -820,7 +820,7 @@ async function loadFilings() {
           const dilutive = formatDilutive(item.dilutive);
           const priceValue = item.price !== undefined ? item.price : item.price_avg;
           const priceLine = Number.isFinite(Number(priceValue))
-            ? `<div class="list-meta">Precio medio: <span class="meta-value">${formatPrice(Number(priceValue))}</span></div>`
+            ? `<div class="list-meta"><span class="meta-label">Precio medio:</span> <span class="meta-value">${formatPrice(Number(priceValue))}</span></div>`
             : "";
           const transactionType = normalizeText(
             item.transaction_type || item.transactionType,
@@ -835,25 +835,25 @@ async function loadFilings() {
           const badge = isNew ? "<span class=\"tag tag--new\">Nuevo</span>" : "";
           const url = item.link || item.url || "";
           const summaryLine = summary && !error
-            ? `<div class="list-meta">Resumen: <span class="meta-value">${summary}</span></div>`
+            ? `<div class="list-meta"><span class="meta-label">Resumen:</span> <span class="meta-value">${summary}</span></div>`
             : "";
           const errorLine = error
             ? `<div class="list-meta error">Error tecnico: ${error}</div>`
             : "";
           const insiderLine = insider !== "no aplica"
-            ? `<div class="list-meta">Insider: <span class="meta-value">${insider}</span></div>`
+            ? `<div class="list-meta"><span class="meta-label">Insider:</span> <span class="meta-value">${insider}</span></div>`
             : "";
           const txnLine = transactionType
-            ? `<div class="list-meta">Tipo: <span class="meta-value">${transactionType}</span></div>`
+            ? `<div class="list-meta"><span class="meta-label">Tipo:</span> <span class="meta-value">${transactionType}</span></div>`
             : "";
           return `
         <div class="list-item">
           <div>
             <div class="list-title">${title} ${badge}</div>
             <div class="list-meta">${[item.symbol || item.ticker, item.date].filter(Boolean).join(" · ")}</div>
-            <div class="list-meta">Evento: <span class="meta-value">${eventType}</span> · Impacto: <span class="meta-value">${impact}</span></div>
+            <div class="list-meta"><span class="meta-label">Evento:</span> <span class="meta-value">${eventType}</span> · <span class="meta-label">Impacto:</span> <span class="meta-value">${impact}</span></div>
             ${insiderLine}
-            <div class="list-meta">Acciones: <span class="meta-value">${shares}</span> · Valor: <span class="meta-value">${value}</span> · Dilutivo: <span class="meta-value">${dilutive}</span></div>
+            <div class="list-meta"><span class="meta-label">Acciones:</span> <span class="meta-value">${shares}</span> · <span class="meta-label">Valor:</span> <span class="meta-value">${value}</span> · <span class="meta-label">Dilutivo:</span> <span class="meta-value">${dilutive}</span></div>
             ${priceLine}
             ${txnLine}
             ${summaryLine}
@@ -895,7 +895,7 @@ async function loadFilings() {
             const dilutive = formatDilutive(item.dilutive);
             const priceValue = item.price !== undefined ? item.price : item.price_avg;
             const priceLine = Number.isFinite(Number(priceValue))
-              ? `<div class="list-meta">Precio medio: <span class="meta-value">${formatPrice(Number(priceValue))}</span></div>`
+              ? `<div class="list-meta"><span class="meta-label">Precio medio:</span> <span class="meta-value">${formatPrice(Number(priceValue))}</span></div>`
               : "";
             const transactionType = normalizeText(
               item.transaction_type || item.transactionType,
@@ -910,25 +910,25 @@ async function loadFilings() {
             const badge = isNew ? "<span class=\"tag tag--new\">Nuevo</span>" : "";
             const url = item.link || item.url || "";
             const summaryLine = summary && !errorMessage
-              ? `<div class="list-meta">Resumen: <span class="meta-value">${summary}</span></div>`
+              ? `<div class="list-meta"><span class="meta-label">Resumen:</span> <span class="meta-value">${summary}</span></div>`
               : "";
             const errorLine = errorMessage
               ? `<div class="list-meta error">Error tecnico: ${errorMessage}</div>`
               : "";
             const insiderLine = insider !== "no aplica"
-              ? `<div class="list-meta">Insider: <span class="meta-value">${insider}</span></div>`
+              ? `<div class="list-meta"><span class="meta-label">Insider:</span> <span class="meta-value">${insider}</span></div>`
               : "";
             const txnLine = transactionType
-              ? `<div class="list-meta">Tipo: <span class="meta-value">${transactionType}</span></div>`
+              ? `<div class="list-meta"><span class="meta-label">Tipo:</span> <span class="meta-value">${transactionType}</span></div>`
               : "";
             return `
         <div class="list-item">
           <div>
             <div class="list-title">${title} ${badge}</div>
             <div class="list-meta">${[item.symbol || item.ticker, item.date].filter(Boolean).join(" · ")}</div>
-            <div class="list-meta">Evento: <span class="meta-value">${eventType}</span> · Impacto: <span class="meta-value">${impact}</span></div>
+            <div class="list-meta"><span class="meta-label">Evento:</span> <span class="meta-value">${eventType}</span> · <span class="meta-label">Impacto:</span> <span class="meta-value">${impact}</span></div>
             ${insiderLine}
-            <div class="list-meta">Acciones: <span class="meta-value">${shares}</span> · Valor: <span class="meta-value">${value}</span> · Dilutivo: <span class="meta-value">${dilutive}</span></div>
+            <div class="list-meta"><span class="meta-label">Acciones:</span> <span class="meta-value">${shares}</span> · <span class="meta-label">Valor:</span> <span class="meta-value">${value}</span> · <span class="meta-label">Dilutivo:</span> <span class="meta-value">${dilutive}</span></div>
             ${priceLine}
             ${txnLine}
             ${summaryLine}

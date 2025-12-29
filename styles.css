@@ -393,8 +393,16 @@ h1 {
   color: var(--muted);
 }
 
+#filingsList .list-meta {
+  font-size: 1rem;
+}
+
+.list-meta .meta-label {
+  font-weight: 600;
+}
+
 .list-meta .meta-value {
-  color: #1c6db6;
+  color: var(--accent);
   font-weight: 600;
 }
 
