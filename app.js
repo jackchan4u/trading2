@@ -9,7 +9,6 @@ const STOCKS = [
   "CRWV",
   "PSTG",
   "CLSK",
-  "LSMC",
 ];
 
 const CRYPTOS = [
@@ -47,6 +46,7 @@ const dom = {
 
 const DEFAULT_STOCK_INTERVAL_SEC = 120;
 const MIN_STOCK_INTERVAL_SEC = 120;
+const STALE_DATA_SECONDS = 60;
 const MAX_HISTORY_POINTS = 300;
 const HISTORY_STORAGE_KEY = "priceHistoryV1";
 const ALERTS_STORAGE_KEY = "priceAlertsV1";
@@ -499,14 +499,18 @@ function updateRow(row, payload) {
   }
 
   priceEl.textContent = formatPrice(payload.price);
-  changeEl.textContent = formatChange(payload.change, payload.changePercent);
-
-  if (payload.change > 0) {
-    changeEl.className = "change up";
-  } else if (payload.change < 0) {
-    changeEl.className = "change down";
-  } else {
+  if (payload.baselineError) {
+    changeEl.textContent = payload.baselineError;
     changeEl.className = "change neutral";
+  } else {
+    changeEl.textContent = formatChange(payload.change, payload.changePercent);
+    if (payload.change > 0) {
+      changeEl.className = "change up";
+    } else if (payload.change < 0) {
+      changeEl.className = "change down";
+    } else {
+      changeEl.className = "change neutral";
+    }
   }
 
   if (rsiEl) {
@@ -529,7 +533,31 @@ function updateRow(row, payload) {
     sessionEl.className = `session ${payload.session || ""}`.trim();
   }
 
-  timeEl.textContent = formatTime(payload.updatedAt);
+  const updatedAtValue = payload.updatedAt;
+  let updatedAtMs = null;
+  if (updatedAtValue instanceof Date) {
+    updatedAtMs = updatedAtValue.getTime();
+  } else if (Number.isFinite(updatedAtValue)) {
+    updatedAtMs = updatedAtValue;
+  } else if (updatedAtValue) {
+    const parsed = new Date(updatedAtValue);
+    if (!Number.isNaN(parsed.getTime())) {
+      updatedAtMs = parsed.getTime();
+    }
+  }
+  if (Number.isFinite(updatedAtMs)) {
+    const stale = (Date.now() - updatedAtMs) > (STALE_DATA_SECONDS * 1000);
+    const timeLabel = formatTime(new Date(updatedAtMs));
+    if (stale) {
+      timeEl.innerHTML = `<span class="stale-icon" aria-hidden="true">🟢</span> ${timeLabel}`;
+    } else {
+      timeEl.textContent = timeLabel;
+    }
+    timeEl.title = stale ? `Dato con mas de ${STALE_DATA_SECONDS}s` : "";
+  } else {
+    timeEl.textContent = "--";
+    timeEl.title = "";
+  }
 }
 
 function createTables() {
@@ -1332,12 +1360,12 @@ async function updateStocks() {
         return;
       }
       const price = Number(item.price);
-      const change = Number(item.change);
-      const changePercent = normalizeChangePercent(
-        Number(item.changePercent),
-        price,
-        change
-      );
+      const change = (item.change === null || item.change === undefined)
+        ? NaN
+        : Number(item.change);
+      const changePercent = (item.changePercent === null || item.changePercent === undefined)
+        ? NaN
+        : Number(item.changePercent);
       if (!Number.isFinite(price)) {
         updateRow(row, { error: "Sin datos" });
         return;

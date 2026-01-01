@@ -5,4 +5,5 @@ __pycache__/
 server.log
 config.json
 filings_cache.json
+previous_close.json
 bin/

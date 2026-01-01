@@ -2,6 +2,7 @@ import json
 import os
 import re
 import socket
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -26,7 +27,6 @@ DEFAULT_SYMBOLS = [
     "CRWV",
     "PSTG",
     "CLSK",
-    "LSMC",
 ]
 
 TWELVE_CREDITS_PER_MINUTE = int(os.environ.get("TWELVE_CREDITS_PER_MINUTE", "8"))
@@ -34,6 +34,7 @@ TWELVE_DAILY_LIMIT = int(os.environ.get("TWELVE_DAILY_LIMIT", "800"))
 DEFAULT_MIN_SYMBOL_REFRESH_SEC = 20 * 60
 _symbol_cache = {}
 _credit_log = deque()
+_refresh_lock = threading.Lock()
 _twelve_daily_used = 0
 _twelve_daily_date = None
 
@@ -57,6 +58,11 @@ SEC_CACHE_PATH = os.environ.get(
     "SEC_CACHE_PATH", os.path.join(os.path.dirname(__file__), "sec_tickers.json")
 )
 SEC_CACHE_TTL = 60 * 60 * 12
+BASELINE_CACHE_PATH = os.environ.get(
+    "BASELINE_CACHE_PATH",
+    os.path.join(os.path.dirname(__file__), "previous_close.json"),
+)
+BASELINE_UPDATE_CUTOFF = dt_time(16, 5)
 NEWS_FEED_URL = (
     "https://feeds.finance.yahoo.com/rss/2.0/headline?s={symbol}&region=US&lang=en-US"
 )
@@ -107,6 +113,7 @@ _filings_cache = {}
 _news_cache = {}
 _press_cache = {}
 _translation_cache = {}
+_baseline_cache = None
 TRANSLATE_DEFAULT_URLS = (
     "https://translate.googleapis.com/translate_a/single",
     "https://libretranslate.de/translate",
@@ -691,6 +698,61 @@ def _save_processed_filings_cache():
             json.dump(cache, handle, ensure_ascii=True)
     except OSError:
         return
+
+
+def _load_baseline_cache():
+    global _baseline_cache
+    if _baseline_cache is not None:
+        return _baseline_cache
+    try:
+        with open(BASELINE_CACHE_PATH, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        _baseline_cache = data if isinstance(data, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        _baseline_cache = {}
+    return _baseline_cache
+
+
+def _save_baseline_cache():
+    cache = _load_baseline_cache()
+    tmp_path = f"{BASELINE_CACHE_PATH}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as handle:
+        json.dump(cache, handle, ensure_ascii=True, indent=2)
+    os.replace(tmp_path, BASELINE_CACHE_PATH)
+
+
+def _get_baseline(symbol):
+    cache = _load_baseline_cache()
+    entry = cache.get(str(symbol).upper())
+    if not isinstance(entry, dict):
+        return None, ""
+    close_value = _to_float(entry.get("close"))
+    date_label = entry.get("date") or ""
+    return close_value, date_label
+
+
+def _set_baseline(symbol, close_value, date_label):
+    if close_value is None:
+        return
+    cache = _load_baseline_cache()
+    cache[str(symbol).upper()] = {
+        "close": close_value,
+        "date": date_label or "",
+    }
+    _save_baseline_cache()
+
+
+def _log_price_metrics(symbol, last_price, previous_close, variation, variation_pct):
+    timestamp = datetime.utcnow().isoformat()
+    app.logger.info(
+        "price_metrics ticker=%s last_price=%s previous_close=%s variation=%s variation_pct=%s timestamp=%s",
+        symbol,
+        last_price,
+        previous_close,
+        variation,
+        variation_pct,
+        timestamp,
+    )
 
 
 def _get_processed_filing(link):
@@ -3109,6 +3171,17 @@ def _eligible_symbols(symbols):
     return [symbol for _, __, symbol in candidates]
 
 
+def _rotation_batch(symbols, batch_size):
+    if not symbols or batch_size <= 0:
+        return []
+    total = len(symbols)
+    if total <= batch_size:
+        return list(symbols)
+    minute = int(time.time() // 60)
+    start = (minute * batch_size) % total
+    return [symbols[(start + offset) % total] for offset in range(batch_size)]
+
+
 def _min_symbol_refresh_sec():
     config = load_config()
     raw = os.environ.get("MIN_SYMBOL_REFRESH_SEC", "")
@@ -3240,30 +3313,59 @@ def fetch_quotes(symbols, api_key):
         return results
     payload = _fetch_twelve_data(symbols, api_key)
     state = _market_state()
+    now = datetime.now(MARKET_TZ)
+    today = now.date().isoformat()
+    after_close = now.time() >= BASELINE_UPDATE_CUTOFF
     for symbol in symbols:
         item = payload.get(symbol)
-        if not isinstance(item, dict) or item.get("status") == "error":
+        if not isinstance(item, dict):
+            continue
+        if item.get("status") == "error":
+            message = item.get("message") or item.get("code") or "Error Twelve Data"
+            results[symbol] = {"error": message}
             continue
         price = _to_float(item.get("price"))
         if price is None:
+            price = _to_float(
+                item.get("close")
+                or item.get("previous_close")
+                or item.get("prev_close")
+                or item.get("previousClose")
+            )
+        if price is None:
+            results[symbol] = {"error": "Sin precio en Twelve Data"}
             continue
-        change = _to_float(item.get("change"))
-        change_percent = _to_float(item.get("percent_change"))
-        previous_close = _to_float(
+        candidate_close = _to_float(
             item.get("previous_close")
             or item.get("prev_close")
             or item.get("previousClose")
+            or item.get("close")
         )
-        if previous_close is not None and previous_close != 0:
-            change = price - previous_close
-            change_percent = (change / previous_close) * 100
+        baseline_close, baseline_date = _get_baseline(symbol)
+        if baseline_close is None and candidate_close is not None:
+            _set_baseline(symbol, candidate_close, "unknown")
+            baseline_close = candidate_close
+            baseline_date = "unknown"
+        if after_close and candidate_close is not None and baseline_date != today:
+            _set_baseline(symbol, candidate_close, today)
+            baseline_close = candidate_close
+            baseline_date = today
+        change = None
+        change_percent = None
+        baseline_error = ""
+        if baseline_close is None or baseline_close == 0:
+            baseline_error = "Error baseline: falta cierre previo"
+        else:
+            change = price - baseline_close
+            change_percent = (change / baseline_close) * 100
         is_open = _normalize_state(item.get("is_market_open"))
         market_state = "open" if is_open else state
         results[symbol] = {
             "price": price,
             "change": change,
             "changePercent": change_percent,
-            "previousClose": previous_close,
+            "previousClose": baseline_close,
+            "baselineError": baseline_error,
             "marketState": market_state,
         }
     return results
@@ -3294,55 +3396,52 @@ def api_stocks():
             400,
         )
 
-    refresh_budget = _available_credits()
-    refresh_list = _eligible_symbols(symbols)[:refresh_budget]
+    refresh_list = []
     error_message = None
-    if refresh_list:
-        try:
-            quotes = fetch_quotes(refresh_list, api_key)
-        except Exception as exc:
-            quotes = {}
-            error_message = str(exc) or "Error API"
-            if _is_daily_limit_error(error_message):
-                _mark_daily_limit_reached()
+    with _refresh_lock:
+        refresh_budget = _available_credits()
+        rotation_list = _rotation_batch(
+            symbols, min(8, TWELVE_CREDITS_PER_MINUTE, len(symbols))
+        )
+        refresh_candidates = _eligible_symbols(rotation_list)
+        refresh_list = refresh_candidates[:refresh_budget]
         if refresh_list:
-            missing = [symbol for symbol in refresh_list if symbol not in quotes]
-            if missing:
-                fallback = fetch_stooq_quotes(missing)
-                quotes.update(fallback)
-        _consume_credits(len(refresh_list))
-        now = time.time()
-        for symbol in refresh_list:
-            payload = quotes.get(symbol)
-            if payload:
-                _symbol_cache[symbol] = {"data": payload, "updatedAt": now}
-            else:
-                _symbol_cache[symbol] = {
-                    "data": {"error": "Sin datos"},
-                    "updatedAt": now,
-                }
-    elif _daily_remaining() == 0:
-        fallback_symbols = _eligible_symbols(symbols)
-        if fallback_symbols:
             try:
-                quotes = fetch_stooq_quotes(fallback_symbols)
-            except Exception:
+                quotes = fetch_quotes(refresh_list, api_key)
+            except Exception as exc:
                 quotes = {}
-            if quotes:
-                now = time.time()
-                for symbol in fallback_symbols:
-                    payload = quotes.get(symbol)
-                    if payload:
-                        _symbol_cache[symbol] = {"data": payload, "updatedAt": now}
+                error_message = str(exc) or "Error API"
+                if _is_daily_limit_error(error_message):
+                    _mark_daily_limit_reached()
+            _consume_credits(len(refresh_list))
+            now = time.time()
+            for symbol in refresh_list:
+                payload = quotes.get(symbol)
+                if payload:
+                    _symbol_cache[symbol] = {"data": payload, "updatedAt": now}
+                else:
+                    error_text = error_message or "Error Twelve Data"
+                    _symbol_cache[symbol] = {
+                        "data": {"error": error_text},
+                        "updatedAt": now,
+                    }
     data = []
     for symbol in symbols:
         entry = _symbol_cache.get(symbol)
         if not entry:
+            _log_price_metrics(symbol, None, None, None, None)
             data.append({"symbol": symbol, "error": "Pendiente"})
             continue
         payload = dict(entry["data"])
         payload["symbol"] = symbol
         payload["updatedAt"] = entry["updatedAt"]
+        _log_price_metrics(
+            symbol,
+            payload.get("price"),
+            payload.get("previousClose"),
+            payload.get("change"),
+            payload.get("changePercent"),
+        )
         data.append(payload)
 
     response = {

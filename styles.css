@@ -304,6 +304,11 @@ h1 {
   color: var(--muted);
 }
 
+.row .time .stale-icon {
+  color: var(--up);
+  margin-right: 4px;
+}
+
 .row .rsi,
 .row .macd {
   font-size: 0.8rem;
