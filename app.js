@@ -7,7 +7,6 @@ const STOCKS = [
   "APLD",
   "SOUN",
   "CRWV",
-  "PSTG",
   "CLSK",
 ];
 

@@ -25,7 +25,6 @@ DEFAULT_SYMBOLS = [
     "APLD",
     "SOUN",
     "CRWV",
-    "PSTG",
     "CLSK",
 ]
 
