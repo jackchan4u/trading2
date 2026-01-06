@@ -1,5 +1,6 @@
 {
   "twelveDataKey": "",
+  "stockDataProvider": "nasdaq",
   "secUserAgent": "PulseBoard/1.0 (contact: jaumecs1@hotmail.es)",
   "pressFallbackLatest": false,
   "pressMaxAgeHours": 0,

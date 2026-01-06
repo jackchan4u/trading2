@@ -1,3 +1,4 @@
+import gzip
 import json
 import os
 import re
@@ -46,6 +47,21 @@ TWELVE_HEADERS = {
         "Chrome/122.0.0.0 Safari/537.36"
     ),
     "Accept": "application/json",
+}
+NASDAQ_DATA_URL = "https://api.nasdaq.com/api/quote/{symbol}/info?assetclass=stocks"
+NASDAQ_SUMMARY_URL = (
+    "https://api.nasdaq.com/api/quote/{symbol}/summary?assetclass=stocks"
+)
+NASDAQ_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/122.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Origin": "https://www.nasdaq.com",
+    "Referer": "https://www.nasdaq.com/",
 }
 MARKET_TZ = ZoneInfo("America/New_York")
 CONFIG_PATH = os.environ.get(
@@ -186,6 +202,21 @@ def _fetch_text(url, headers, timeout=8):
     request_obj = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(request_obj, timeout=timeout) as response:
         return response.read().decode("utf-8")
+
+
+def _read_response_text(response):
+    payload = response.read()
+    encoding = response.headers.get("Content-Encoding", "").lower()
+    if "gzip" in encoding:
+        payload = gzip.decompress(payload)
+    return payload.decode("utf-8")
+
+
+def _fetch_nasdaq_json(url, timeout=8):
+    request_obj = urllib.request.Request(url, headers=NASDAQ_HEADERS)
+    with urllib.request.urlopen(request_obj, timeout=timeout) as response:
+        payload = _read_response_text(response)
+    return json.loads(payload)
 
 
 def _get_translation_settings():
@@ -3113,6 +3144,160 @@ def fetch_stooq_quotes(symbols):
     return results
 
 
+def _nasdaq_first_number(*values):
+    for value in values:
+        parsed = _to_float_loose(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _nasdaq_previous_close_from_summary(payload):
+    if not isinstance(payload, dict):
+        return None
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return None
+    summary = data.get("summaryData")
+    if not isinstance(summary, dict):
+        return None
+    for key, value in summary.items():
+        key_norm = str(key).strip().lower().replace(" ", "")
+        if "previousclose" in key_norm:
+            return _to_float_loose(value)
+    return None
+
+
+def _fetch_nasdaq_quote(symbol):
+    url = NASDAQ_DATA_URL.format(symbol=urllib.parse.quote(symbol))
+    payload = _fetch_nasdaq_json(url)
+    if not isinstance(payload, dict):
+        return None
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return None
+
+    primary = data.get("primaryData")
+    if not isinstance(primary, dict):
+        primary = {}
+    extended = data.get("extendedMarket")
+    if not isinstance(extended, dict):
+        extended = {}
+
+    market_state = _normalize_nasdaq_market_state(
+        data.get("marketStatus") or data.get("marketStatusIndicator")
+    )
+    extended_state = _normalize_nasdaq_market_state(
+        data.get("extendedMarketStatus") or extended.get("marketStatus")
+    )
+    if extended_state and not market_state:
+        market_state = extended_state
+
+    price = _nasdaq_first_number(
+        primary.get("lastSalePrice"),
+        primary.get("price"),
+        data.get("lastSalePrice"),
+        data.get("price"),
+    )
+    change = _nasdaq_first_number(
+        primary.get("netChange"),
+        primary.get("change"),
+        data.get("netChange"),
+        data.get("change"),
+    )
+    change_percent = _nasdaq_first_number(
+        primary.get("percentageChange"),
+        primary.get("changePercent"),
+        data.get("percentageChange"),
+        data.get("changePercent"),
+    )
+    previous_close = _nasdaq_first_number(
+        data.get("previousClose"),
+        data.get("previousClosePrice"),
+        data.get("prevClose"),
+    )
+    extended_price = _nasdaq_first_number(
+        data.get("extendedMarketPrice"),
+        extended.get("lastSalePrice"),
+        extended.get("price"),
+    )
+    extended_change = _nasdaq_first_number(
+        data.get("extendedMarketChange"),
+        extended.get("netChange"),
+        extended.get("change"),
+    )
+    extended_percent = _nasdaq_first_number(
+        data.get("extendedMarketPercentageChange"),
+        extended.get("percentageChange"),
+        extended.get("changePercent"),
+    )
+
+    if market_state in ("premarket", "after") and extended_price is not None:
+        price = extended_price
+        if extended_change is not None:
+            change = extended_change
+        if extended_percent is not None:
+            change_percent = extended_percent
+
+    if previous_close is None:
+        summary_url = NASDAQ_SUMMARY_URL.format(
+            symbol=urllib.parse.quote(symbol)
+        )
+        try:
+            summary_payload = _fetch_nasdaq_json(summary_url)
+        except Exception:
+            summary_payload = None
+        previous_close = _nasdaq_previous_close_from_summary(summary_payload)
+
+    if previous_close is None and price is not None and change is not None:
+        previous_close = price - change
+    if change is None and price is not None and previous_close is not None:
+        change = price - previous_close
+    if (
+        change_percent is None
+        and change is not None
+        and previous_close
+    ):
+        change_percent = (change / previous_close) * 100
+    if (
+        change is None
+        and price is not None
+        and change_percent is not None
+    ):
+        base = 1 + (change_percent / 100)
+        if base:
+            if previous_close is None:
+                previous_close = price / base
+            if previous_close is not None:
+                change = price - previous_close
+
+    if price is None:
+        return None
+
+    return {
+        "price": price,
+        "change": change,
+        "changePercent": change_percent,
+        "previousClose": previous_close,
+        "marketState": market_state or _market_state(),
+    }
+
+
+def fetch_nasdaq_quotes(symbols):
+    results = {}
+    for symbol in symbols:
+        try:
+            quote = _fetch_nasdaq_quote(symbol)
+        except Exception:
+            quote = None
+        if quote:
+            results[symbol] = quote
+        else:
+            results[symbol] = {"error": "Sin datos Nasdaq"}
+        time.sleep(0.08)
+    return results
+
+
 def parse_symbols():
     raw = request.args.get("symbols", "")
     if not raw:
@@ -3195,6 +3380,22 @@ def _min_symbol_refresh_sec():
     return value
 
 
+def _stock_provider():
+    config = load_config()
+    raw = (
+        os.environ.get("STOCK_DATA_PROVIDER", "").strip()
+        or str(config.get("stockDataProvider", "")).strip()
+    )
+    value = raw.lower()
+    if value in ("twelvedata", "twelve", "twelve_data", "twelve-data"):
+        return "twelvedata"
+    if value in ("stooq",):
+        return "stooq"
+    if value in ("nasdaq", "ndaq"):
+        return "nasdaq"
+    return "nasdaq"
+
+
 def _reset_daily_credits_if_needed():
     global _twelve_daily_date, _twelve_daily_used
     today = datetime.utcnow().date()
@@ -3239,6 +3440,30 @@ def _to_float(value):
         return None
 
 
+def _to_float_loose(value):
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        if "value" in value:
+            value = value.get("value")
+        elif "raw" in value:
+            value = value.get("raw")
+        else:
+            return None
+    text = str(value).strip()
+    if not text or text.lower() in ("n/a", "na", "--"):
+        return None
+    if text.startswith("(") and text.endswith(")"):
+        text = f"-{text[1:-1]}"
+    text = (
+        text.replace("$", "")
+        .replace(",", "")
+        .replace("%", "")
+        .replace("+", "")
+    )
+    return _to_float(text)
+
+
 def _market_state():
     now = datetime.now(MARKET_TZ)
     if now.weekday() >= 5:
@@ -3251,6 +3476,21 @@ def _market_state():
     if dt_time(16, 0) <= current < dt_time(20, 0):
         return "after"
     return "closed"
+
+
+def _normalize_nasdaq_market_state(value):
+    if not value:
+        return None
+    text = str(value).strip().lower()
+    if "pre" in text:
+        return "premarket"
+    if "after" in text or "post" in text:
+        return "after"
+    if "open" in text:
+        return "open"
+    if "close" in text:
+        return "closed"
+    return None
 
 
 def _normalize_state(value):
@@ -3378,48 +3618,72 @@ def index():
 @app.route("/api/stocks")
 def api_stocks():
     symbols = parse_symbols()
-    api_key = (
-        request.args.get("apikey", "").strip()
-        or os.environ.get("TWELVE_DATA_KEY", "").strip()
-        or str(CONFIG.get("twelveDataKey", "")).strip()
-    )
-    if not api_key:
-        return (
-            jsonify(
-                {
-                    "error": (
-                        "API key requerida (config.json o env TWELVE_DATA_KEY)"
-                    )
-                }
-            ),
-            400,
+    provider = _stock_provider()
+    api_key = None
+    if provider == "twelvedata":
+        api_key = (
+            request.args.get("apikey", "").strip()
+            or os.environ.get("TWELVE_DATA_KEY", "").strip()
+            or str(CONFIG.get("twelveDataKey", "")).strip()
         )
+        if not api_key:
+            return (
+                jsonify(
+                    {
+                        "error": (
+                            "API key requerida (config.json o env TWELVE_DATA_KEY)"
+                        )
+                    }
+                ),
+                400,
+            )
 
     refresh_list = []
     error_message = None
     with _refresh_lock:
-        refresh_budget = _available_credits()
-        rotation_list = _rotation_batch(
-            symbols, min(8, TWELVE_CREDITS_PER_MINUTE, len(symbols))
-        )
+        if provider == "twelvedata":
+            refresh_budget = _available_credits()
+            rotation_list = _rotation_batch(
+                symbols, min(8, TWELVE_CREDITS_PER_MINUTE, len(symbols))
+            )
+        else:
+            refresh_budget = len(symbols)
+            rotation_list = list(symbols)
         refresh_candidates = _eligible_symbols(rotation_list)
         refresh_list = refresh_candidates[:refresh_budget]
         if refresh_list:
             try:
-                quotes = fetch_quotes(refresh_list, api_key)
+                if provider == "twelvedata":
+                    quotes = fetch_quotes(refresh_list, api_key)
+                elif provider == "nasdaq":
+                    quotes = fetch_nasdaq_quotes(refresh_list)
+                elif provider == "stooq":
+                    quotes = fetch_stooq_quotes(refresh_list)
+                else:
+                    quotes = {}
+                    error_message = "Proveedor no soportado"
             except Exception as exc:
                 quotes = {}
                 error_message = str(exc) or "Error API"
-                if _is_daily_limit_error(error_message):
+                if provider == "twelvedata" and _is_daily_limit_error(
+                    error_message
+                ):
                     _mark_daily_limit_reached()
-            _consume_credits(len(refresh_list))
+            if provider == "twelvedata":
+                _consume_credits(len(refresh_list))
             now = time.time()
             for symbol in refresh_list:
                 payload = quotes.get(symbol)
                 if payload:
                     _symbol_cache[symbol] = {"data": payload, "updatedAt": now}
                 else:
-                    error_text = error_message or "Error Twelve Data"
+                    if provider == "nasdaq":
+                        fallback_error = "Error Nasdaq"
+                    elif provider == "stooq":
+                        fallback_error = "Error Stooq"
+                    else:
+                        fallback_error = "Error API"
+                    error_text = error_message or fallback_error
                     _symbol_cache[symbol] = {
                         "data": {"error": error_text},
                         "updatedAt": now,
@@ -3447,9 +3711,14 @@ def api_stocks():
         "updatedAt": int(time.time()),
         "data": data,
         "meta": {
-            "creditsPerMinute": TWELVE_CREDITS_PER_MINUTE,
+            "creditsPerMinute": (
+                TWELVE_CREDITS_PER_MINUTE
+                if provider == "twelvedata"
+                else 0
+            ),
             "refreshed": len(refresh_list),
             "error": error_message,
+            "provider": provider,
         },
     }
     return jsonify(response)
