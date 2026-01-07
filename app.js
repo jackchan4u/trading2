@@ -55,6 +55,9 @@ const NEWS_REFRESH_MS = 3 * 60 * 1000;
 const PRESS_REFRESH_MS = 6 * 60 * 1000;
 const CRYPTO_NEWS_REFRESH_MS = 6 * 60 * 1000;
 const CRYPTO_PRESS_REFRESH_MS = 8 * 60 * 1000;
+const EVENTS_REFRESH_MS = NEWS_REFRESH_MS;
+const EVENTS_CACHE_MS = EVENTS_REFRESH_MS;
+const CRYPTO_EVENT_WINDOW_HOURS = 24;
 const MARKET_TIMEZONE = "America/New_York";
 const MARKET_STATE_STALE_MS = 15 * 60 * 1000;
 const LIST_CACHE_LIMIT = 60;
@@ -63,6 +66,8 @@ const NEWS_STORAGE_KEY = "newsCacheV1";
 const FILINGS_STORAGE_KEY = "filingsCacheV2";
 const CRYPTO_NEWS_STORAGE_KEY = "cryptoNewsCacheV1";
 const CRYPTO_PRESS_STORAGE_KEY = "cryptoPressCacheV1";
+const EVENTS_STORAGE_KEY = "eventsCacheV1";
+const EVENTS_LIST_LIMIT = 6;
 
 const state = {
   stockIntervalMs: DEFAULT_STOCK_INTERVAL_SEC * 1000,
@@ -78,6 +83,16 @@ const latestCryptos = new Map();
 const history = new Map();
 let historySaveTimer = null;
 let alerts = [];
+let eventsSnapshot = null;
+let eventsSnapshotAt = 0;
+let eventsSnapshotPromise = null;
+const listExpansion = {
+  filings: false,
+  press: false,
+  news: false,
+  cryptoPress: false,
+  cryptoNews: false,
+};
 
 const cryptoPairs = CRYPTOS.map((label) => ({
   label,
@@ -214,6 +229,66 @@ function formatDateTime(timestamp) {
   });
 }
 
+function formatEventDate(value) {
+  if (!value) return "";
+  const parsed = Date.parse(value);
+  if (!Number.isNaN(parsed)) return formatDateTime(parsed);
+  return String(value);
+}
+
+function getItemTimeMs(item) {
+  const direct = Number(item && item.timestamp);
+  if (Number.isFinite(direct)) {
+    return direct > 1e12 ? direct : direct * 1000;
+  }
+  const raw = item && (item.date || item.fecha_evento);
+  if (raw) {
+    const parsed = Date.parse(raw);
+    if (!Number.isNaN(parsed)) return parsed;
+  }
+  return 0;
+}
+
+function filterWindowWithLatest(items, hours, getSymbol) {
+  const cutoff = Date.now() - (hours * 60 * 60 * 1000);
+  const sorted = [...items].sort((a, b) => getItemTimeMs(b) - getItemTimeMs(a));
+  const within = sorted.filter((item) => {
+    const ts = getItemTimeMs(item);
+    return ts && ts >= cutoff;
+  });
+  const seen = new Set(within.map(buildItemId).filter(Boolean));
+  const latestBySymbol = new Map();
+  sorted.forEach((item) => {
+    const symbol = getSymbol(item);
+    if (!symbol) return;
+    if (!latestBySymbol.has(symbol)) latestBySymbol.set(symbol, item);
+  });
+  latestBySymbol.forEach((item) => {
+    const id = buildItemId(item);
+    if (!id || seen.has(id)) return;
+    within.push(item);
+    seen.add(id);
+  });
+  return within.sort((a, b) => getItemTimeMs(b) - getItemTimeMs(a));
+}
+
+function renderEventList(container, items, stateKey, emptyText, renderItem) {
+  if (!container) return;
+  if (!items.length) {
+    container.innerHTML = `<div class="empty">${emptyText}</div>`;
+    return;
+  }
+  const expanded = listExpansion[stateKey];
+  const visible = expanded ? items : items.slice(0, EVENTS_LIST_LIMIT);
+  const list = visible.map(renderItem).join("");
+  const needsToggle = items.length > EVENTS_LIST_LIMIT;
+  const toggleLabel = expanded ? "Ver menos" : "Ver más";
+  const toggle = needsToggle
+    ? `<div class="list-toggle-wrap"><button class="list-toggle" data-toggle="${stateKey}">${toggleLabel}</button></div>`
+    : "";
+  container.innerHTML = `${list}${toggle}`;
+}
+
 function formatImpactLevel(value) {
   if (!value) return "desconocido";
   return String(value);
@@ -299,7 +374,13 @@ function resolveMarketState(serverState, updatedAtMs) {
 function buildItemId(item) {
   if (!item || typeof item !== "object") return "";
   if (item.link || item.url) return String(item.link || item.url);
-  const fallback = [item.symbol, item.form, item.title, item.date]
+  if (item.resumen && item.resumen.link) return String(item.resumen.link);
+  const fallback = [
+    item.ticker || item.symbol,
+    item.tipo_evento || item.form,
+    item.title || (item.resumen ? item.resumen.titulo : ""),
+    item.fecha_evento || item.date,
+  ]
     .filter(Boolean)
     .join("|");
   return fallback;
@@ -308,7 +389,8 @@ function buildItemId(item) {
 function getItemTimestamp(item) {
   const direct = Number(item.timestamp);
   if (Number.isFinite(direct)) return direct;
-  const dateValue = item && item.date ? Date.parse(item.date) : NaN;
+  const rawDate = item ? (item.date || item.fecha_evento) : "";
+  const dateValue = rawDate ? Date.parse(rawDate) : NaN;
   if (!Number.isNaN(dateValue)) return dateValue / 1000;
   return 0;
 }
@@ -799,6 +881,41 @@ async function fetchPress() {
   return Array.isArray(payload.data) ? payload.data : [];
 }
 
+async function fetchEvents() {
+  const response = await fetch("/events");
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload.error || "Error API");
+  }
+  return {
+    data: Array.isArray(payload.data) ? payload.data : [],
+    errors: Array.isArray(payload.errors) ? payload.errors : [],
+  };
+}
+
+async function getEventsSnapshot() {
+  const now = Date.now();
+  if (eventsSnapshot && (now - eventsSnapshotAt) < EVENTS_CACHE_MS) {
+    return eventsSnapshot;
+  }
+  if (eventsSnapshotPromise) {
+    return eventsSnapshotPromise;
+  }
+  eventsSnapshotPromise = fetchEvents()
+    .then((snapshot) => {
+      eventsSnapshot = snapshot;
+      eventsSnapshotAt = Date.now();
+      eventsSnapshotPromise = null;
+      writeListCache(EVENTS_STORAGE_KEY, snapshot.data);
+      return snapshot;
+    })
+    .catch((error) => {
+      eventsSnapshotPromise = null;
+      throw error;
+    });
+  return eventsSnapshotPromise;
+}
+
 async function fetchCryptoNews() {
   const url = `/api/news?symbols=${encodeURIComponent(CRYPTO_NEWS_SYMBOLS.join(","))}`;
   const response = await fetch(url);
@@ -822,163 +939,100 @@ async function fetchCryptoPress() {
 async function loadFilings() {
   if (!dom.filingsList) return;
   dom.filingsList.innerHTML = "<div class=\"empty\">Cargando informes...</div>";
-  try {
-    const items = mergeCachedItems(
-      FILINGS_STORAGE_KEY,
-      await fetchFilings(),
-      LIST_CACHE_LIMIT
-    );
-    if (!items.length) {
-      dom.filingsList.innerHTML = "<div class=\"empty\">Sin informes recientes.</div>";
-      return;
-    }
+  const renderItems = (items) => {
     const seen = loadSeenFilings();
     const nextSeen = new Set(seen);
-    dom.filingsList.innerHTML = items
-      .map(
-        (item) => {
-          const impact = formatImpactLevel(item.impact);
-          const eventType = normalizeText(
-            item.eventType || item.event_type,
-            "sin clasificar"
-          );
-          const insider = normalizeText(
-            item.insiderRole || item.insider_role || item.insiderAction,
-            "no aplica"
-          );
-          const sharesValue = (item.shares === null || item.shares === undefined)
+    renderEventList(
+      dom.filingsList,
+      items,
+      "filings",
+      "Sin informes recientes.",
+      (item) => {
+        const resumen = item.resumen || {};
+        const detail = resumen.detalle || {};
+        const impact = formatImpactLevel(item.impacto);
+        const eventType = normalizeText(
+          detail.evento || item.tipo_evento,
+          "sin clasificar"
+        );
+        const insiderRaw = normalizeText(detail.insider, "no aplica");
+        const action = normalizeText(detail.accion, "");
+        const insiderLabel = [
+          insiderRaw !== "no aplica" ? insiderRaw : "",
+          action,
+        ]
+          .filter(Boolean)
+          .join(" · ");
+        const insiderLine = insiderLabel
+          ? `<div class="list-meta"><span class="meta-label">Insider:</span> <span class="meta-value">${insiderLabel}</span></div>`
+          : "";
+        const sharesValue =
+          detail.acciones === null || detail.acciones === undefined
             ? NaN
-            : Number(item.shares);
-          const valueSource = item.value_usd !== undefined ? item.value_usd : item.value;
-          const valueAmount = (valueSource === null || valueSource === undefined)
+            : Number(detail.acciones);
+        const valueAmount =
+          detail.valor_usd === null || detail.valor_usd === undefined
             ? NaN
-            : Number(valueSource);
-          const shares = formatShares(sharesValue);
-          const value = formatValue(valueAmount);
-          const dilutive = formatDilutive(item.dilutive);
-          const priceValue = item.price !== undefined ? item.price : item.price_avg;
-          const priceLine = Number.isFinite(Number(priceValue))
-            ? `<div class="list-meta"><span class="meta-label">Precio medio:</span> <span class="meta-value">${formatPrice(Number(priceValue))}</span></div>`
+            : Number(detail.valor_usd);
+        const shares = formatShares(sharesValue);
+        const value = formatValue(valueAmount);
+        const dilutive = normalizeText(item.dilutivo, "no");
+        const title = normalizeText(
+          resumen.titulo || item.tipo_evento,
+          "Informe"
+        );
+        const dateLabel = formatEventDate(item.fecha_evento);
+        const itemsValue =
+          Array.isArray(detail.items) && detail.items.length
+            ? detail.items.join(", ")
             : "";
-          const transactionType = normalizeText(
-            item.transaction_type || item.transactionType,
-            ""
-          );
-          const summary = normalizeText(item.summary, "");
-          const error = item.documentError;
-          const id = buildItemId(item);
-          const isNew = id ? !seen.has(id) : false;
-          if (id) nextSeen.add(id);
-          const title = item.form || item.form_type || "Informe";
-          const badge = isNew ? "<span class=\"tag tag--new\">Nuevo</span>" : "";
-          const url = item.link || item.url || "";
-          const summaryLine = summary && !error
-            ? `<div class="list-meta"><span class="meta-label">Resumen:</span> <span class="meta-value">${summary}</span></div>`
-            : "";
-          const errorLine = error
-            ? `<div class="list-meta error">Error tecnico: ${error}</div>`
-            : "";
-          const insiderLine = insider !== "no aplica"
-            ? `<div class="list-meta"><span class="meta-label">Insider:</span> <span class="meta-value">${insider}</span></div>`
-            : "";
-          const txnLine = transactionType
-            ? `<div class="list-meta"><span class="meta-label">Tipo:</span> <span class="meta-value">${transactionType}</span></div>`
-            : "";
-          return `
+        const itemsLine = itemsValue
+          ? `<div class="list-meta"><span class="meta-label">Elementos:</span> <span class="meta-value">${itemsValue}</span></div>`
+          : "";
+        const materialLine =
+          detail.material === true
+            ? "<div class=\"list-meta\"><span class=\"meta-label\">Material:</span> <span class=\"meta-value\">si</span></div>"
+            : detail.material === false
+              ? "<div class=\"list-meta\"><span class=\"meta-label\">Material:</span> <span class=\"meta-value\">no</span></div>"
+              : "";
+        const errorLine = detail.error
+          ? `<div class="list-meta error">Error tecnico: ${detail.error}</div>`
+          : "";
+        const id = buildItemId(item);
+        const isNew = id ? !seen.has(id) : false;
+        if (id) nextSeen.add(id);
+        const badge = isNew ? "<span class=\"tag tag--new\">Nuevo</span>" : "";
+        const url = resumen.link || "";
+        return `
         <div class="list-item">
           <div>
             <div class="list-title">${title} ${badge}</div>
-            <div class="list-meta">${[item.symbol || item.ticker, item.date].filter(Boolean).join(" · ")}</div>
+            <div class="list-meta">${[item.ticker, dateLabel].filter(Boolean).join(" · ")}</div>
             <div class="list-meta"><span class="meta-label">Evento:</span> <span class="meta-value">${eventType}</span> · <span class="meta-label">Impacto:</span> <span class="meta-value">${impact}</span></div>
             ${insiderLine}
             <div class="list-meta"><span class="meta-label">Acciones:</span> <span class="meta-value">${shares}</span> · <span class="meta-label">Valor:</span> <span class="meta-value">${value}</span> · <span class="meta-label">Dilutivo:</span> <span class="meta-value">${dilutive}</span></div>
-            ${priceLine}
-            ${txnLine}
-            ${summaryLine}
+            ${itemsLine}
+            ${materialLine}
             ${errorLine}
           </div>
           <a class="link" href="${url}" target="_blank" rel="noopener">Ver</a>
         </div>
       `;
-        }
-      )
-      .join("");
+      }
+    );
     saveSeenFilings(nextSeen);
+  };
+  try {
+    const snapshot = await getEventsSnapshot();
+    const items = snapshot.data.filter((item) =>
+      String(item.tipo_evento || "").startsWith("SEC_")
+    );
+    writeListCache(FILINGS_STORAGE_KEY, items);
+    renderItems(items);
   } catch (error) {
     const cached = readListCache(FILINGS_STORAGE_KEY);
     if (cached.length) {
-      const seen = loadSeenFilings();
-      const nextSeen = new Set(seen);
-      dom.filingsList.innerHTML = cached
-        .map(
-          (item) => {
-            const impact = formatImpactLevel(item.impact);
-            const eventType = normalizeText(
-              item.eventType || item.event_type,
-              "sin clasificar"
-            );
-            const insider = normalizeText(
-              item.insiderRole || item.insider_role || item.insiderAction,
-              "no aplica"
-            );
-            const sharesValue = (item.shares === null || item.shares === undefined)
-              ? NaN
-              : Number(item.shares);
-            const valueSource = item.value_usd !== undefined ? item.value_usd : item.value;
-            const valueAmount = (valueSource === null || valueSource === undefined)
-              ? NaN
-              : Number(valueSource);
-            const shares = formatShares(sharesValue);
-            const value = formatValue(valueAmount);
-            const dilutive = formatDilutive(item.dilutive);
-            const priceValue = item.price !== undefined ? item.price : item.price_avg;
-            const priceLine = Number.isFinite(Number(priceValue))
-              ? `<div class="list-meta"><span class="meta-label">Precio medio:</span> <span class="meta-value">${formatPrice(Number(priceValue))}</span></div>`
-              : "";
-            const transactionType = normalizeText(
-              item.transaction_type || item.transactionType,
-              ""
-            );
-            const summary = normalizeText(item.summary, "");
-            const errorMessage = item.documentError;
-            const id = buildItemId(item);
-            const isNew = id ? !seen.has(id) : false;
-            if (id) nextSeen.add(id);
-            const title = item.form || item.form_type || "Informe";
-            const badge = isNew ? "<span class=\"tag tag--new\">Nuevo</span>" : "";
-            const url = item.link || item.url || "";
-            const summaryLine = summary && !errorMessage
-              ? `<div class="list-meta"><span class="meta-label">Resumen:</span> <span class="meta-value">${summary}</span></div>`
-              : "";
-            const errorLine = errorMessage
-              ? `<div class="list-meta error">Error tecnico: ${errorMessage}</div>`
-              : "";
-            const insiderLine = insider !== "no aplica"
-              ? `<div class="list-meta"><span class="meta-label">Insider:</span> <span class="meta-value">${insider}</span></div>`
-              : "";
-            const txnLine = transactionType
-              ? `<div class="list-meta"><span class="meta-label">Tipo:</span> <span class="meta-value">${transactionType}</span></div>`
-              : "";
-            return `
-        <div class="list-item">
-          <div>
-            <div class="list-title">${title} ${badge}</div>
-            <div class="list-meta">${[item.symbol || item.ticker, item.date].filter(Boolean).join(" · ")}</div>
-            <div class="list-meta"><span class="meta-label">Evento:</span> <span class="meta-value">${eventType}</span> · <span class="meta-label">Impacto:</span> <span class="meta-value">${impact}</span></div>
-            ${insiderLine}
-            <div class="list-meta"><span class="meta-label">Acciones:</span> <span class="meta-value">${shares}</span> · <span class="meta-label">Valor:</span> <span class="meta-value">${value}</span> · <span class="meta-label">Dilutivo:</span> <span class="meta-value">${dilutive}</span></div>
-            ${priceLine}
-            ${txnLine}
-            ${summaryLine}
-            ${errorLine}
-          </div>
-          <a class="link" href="${url}" target="_blank" rel="noopener">Ver</a>
-        </div>
-      `
-          }
-        )
-        .join("");
-      saveSeenFilings(nextSeen);
+      renderItems(cached);
       return;
     }
     dom.filingsList.innerHTML = `<div class="empty">${error.message}</div>`;
@@ -988,61 +1042,45 @@ async function loadFilings() {
 async function loadNews() {
   if (!dom.newsList) return;
   dom.newsList.innerHTML = "<div class=\"empty\">Cargando noticias...</div>";
-  try {
-    const items = mergeCachedItems(
-      NEWS_STORAGE_KEY,
-      await fetchNews(),
-      LIST_CACHE_LIMIT
-    );
-    if (!items.length) {
-      dom.newsList.innerHTML = "<div class=\"empty\">Sin noticias recientes.</div>";
-      return;
-    }
-    dom.newsList.innerHTML = items
-      .map(
-        (item) => {
-          const classification = formatClassification(item.classification);
-          const impact = formatImpact(item.impact);
-          const ignore = formatIgnoreFlag(item.ignore);
-          const reason = normalizeText(item.reason, "Sin datos verificables");
-          return `
+  const renderItems = (items) => {
+    renderEventList(
+      dom.newsList,
+      items,
+      "news",
+      "Sin noticias recientes.",
+      (item) => {
+        const resumen = item.resumen || {};
+        const impact = formatImpact(item.impacto);
+        const title = normalizeText(
+          resumen.tituloTranslated || resumen.titulo,
+          "Noticia"
+        );
+        const source = normalizeText(resumen.fuente, "N/D");
+        const dateLabel = formatEventDate(item.fecha_evento);
+        return `
         <div class="list-item">
           <div>
-            <div class="list-title">${getTranslatedTitle(item, "Noticia")}</div>
-            <div class="list-meta">${[item.symbol, item.date].filter(Boolean).join(" · ")}</div>
-            <div class="list-meta">Clasificacion: ${classification} · Impacto: ${impact} · ${ignore}</div>
-            <div class="list-meta">Motivo: ${reason}</div>
+            <div class="list-title">${title}</div>
+            <div class="list-meta">${[item.ticker, dateLabel].filter(Boolean).join(" · ")}</div>
+            <div class="list-meta">Impacto: ${impact} · Fuente: ${source}</div>
           </div>
-          <a class="link" href="${item.link}" target="_blank" rel="noopener">Leer</a>
+          <a class="link" href="${resumen.link || ""}" target="_blank" rel="noopener">Leer</a>
         </div>
       `;
-        }
-      )
-      .join("");
+      }
+    );
+  };
+  try {
+    const snapshot = await getEventsSnapshot();
+    const items = snapshot.data.filter(
+      (item) => item.tipo_evento === "NEWS"
+    );
+    writeListCache(NEWS_STORAGE_KEY, items);
+    renderItems(items);
   } catch (error) {
     const cached = readListCache(NEWS_STORAGE_KEY);
     if (cached.length) {
-      dom.newsList.innerHTML = cached
-        .map(
-          (item) => {
-            const classification = formatClassification(item.classification);
-            const impact = formatImpact(item.impact);
-            const ignore = formatIgnoreFlag(item.ignore);
-            const reason = normalizeText(item.reason, "Sin datos verificables");
-            return `
-        <div class="list-item">
-          <div>
-            <div class="list-title">${getTranslatedTitle(item, "Noticia")}</div>
-            <div class="list-meta">${[item.symbol, item.date].filter(Boolean).join(" · ")}</div>
-            <div class="list-meta">Clasificacion: ${classification} · Impacto: ${impact} · ${ignore}</div>
-            <div class="list-meta">Motivo: ${reason}</div>
-          </div>
-          <a class="link" href="${item.link}" target="_blank" rel="noopener">Leer</a>
-        </div>
-      `;
-          }
-        )
-        .join("");
+      renderItems(cached);
       return;
     }
     dom.newsList.innerHTML = `<div class="empty">${error.message}</div>`;
@@ -1052,97 +1090,44 @@ async function loadNews() {
 async function loadPress() {
   if (!dom.pressList) return;
   dom.pressList.innerHTML = "<div class=\"empty\">Cargando notas de prensa...</div>";
-  try {
-    const items = mergeCachedItems(
-      PRESS_STORAGE_KEY,
-      await fetchPress(),
-      LIST_CACHE_LIMIT
-    );
-    const officialItems = items.filter((item) => item.official === true);
-    const fallbackItems = items.filter((item) => item.fallback === true);
-    if (!officialItems.length) {
-      if (!fallbackItems.length) {
-        dom.pressList.innerHTML = "<div class=\"empty\">Sin NDP oficiales.</div>";
-        return;
+  const renderItems = (items) => {
+    renderEventList(
+      dom.pressList,
+      items,
+      "press",
+      "Sin NDP oficiales.",
+      (item) => {
+        const resumen = item.resumen || {};
+        const title = normalizeText(
+          resumen.tituloTranslated || resumen.titulo,
+          "Nota de prensa"
+        );
+        const source = normalizeText(resumen.fuente, "N/D");
+        const dateLabel = formatEventDate(item.fecha_evento);
+        return `
+        <div class="list-item">
+          <div>
+            <div class="list-title">${title}</div>
+            <div class="list-meta">${[item.ticker, dateLabel].filter(Boolean).join(" · ")}</div>
+            <div class="list-meta">Fuente oficial: ${source}</div>
+          </div>
+          <a class="link" href="${resumen.link || ""}" target="_blank" rel="noopener">Leer</a>
+        </div>
+      `;
       }
-      const hint =
-        "<div class=\"list-hint\">Sin NDP oficiales; mostrando ultima noticia por ticker (no oficial).</div>";
-      const list = fallbackItems
-        .map(
-          (item) => `
-        <div class="list-item">
-          <div>
-            <div class="list-title">${getTranslatedTitle(item, "Nota de prensa")}</div>
-            <div class="list-meta">${[item.symbol, item.date].filter(Boolean).join(" · ")}</div>
-            <div class="list-meta">No oficial (solo comprobacion)</div>
-          </div>
-          <a class="link" href="${item.link}" target="_blank" rel="noopener">Leer</a>
-        </div>
-      `
-        )
-        .join("");
-      dom.pressList.innerHTML = `${hint}${list}`;
-      return;
-    }
-    const list = officialItems
-      .map(
-        (item) => `
-        <div class="list-item">
-          <div>
-            <div class="list-title">${getTranslatedTitle(item, "Nota de prensa")}</div>
-            <div class="list-meta">${[item.symbol, item.date].filter(Boolean).join(" · ")}</div>
-            <div class="list-meta">Fuente oficial: ${item.source || "N/D"}</div>
-          </div>
-          <a class="link" href="${item.link}" target="_blank" rel="noopener">Leer</a>
-        </div>
-      `
-      )
-      .join("");
-    dom.pressList.innerHTML = list;
+    );
+  };
+  try {
+    const snapshot = await getEventsSnapshot();
+    const items = snapshot.data.filter(
+      (item) => item.tipo_evento === "PRESS_RELEASE"
+    );
+    writeListCache(PRESS_STORAGE_KEY, items);
+    renderItems(items);
   } catch (error) {
     const cached = readListCache(PRESS_STORAGE_KEY);
     if (cached.length) {
-      const officialItems = cached.filter((item) => item.official === true);
-      const fallbackItems = cached.filter((item) => item.fallback === true);
-      if (!officialItems.length) {
-        if (!fallbackItems.length) {
-          dom.pressList.innerHTML = "<div class=\"empty\">Sin NDP oficiales.</div>";
-          return;
-        }
-        const hint =
-          "<div class=\"list-hint\">Sin NDP oficiales; mostrando ultima noticia por ticker (no oficial).</div>";
-        const list = fallbackItems
-          .map(
-            (item) => `
-        <div class="list-item">
-          <div>
-            <div class="list-title">${getTranslatedTitle(item, "Nota de prensa")}</div>
-            <div class="list-meta">${[item.symbol, item.date].filter(Boolean).join(" · ")}</div>
-            <div class="list-meta">No oficial (solo comprobacion)</div>
-          </div>
-          <a class="link" href="${item.link}" target="_blank" rel="noopener">Leer</a>
-        </div>
-      `
-          )
-          .join("");
-        dom.pressList.innerHTML = `${hint}${list}`;
-        return;
-      }
-      const list = officialItems
-        .map(
-          (item) => `
-        <div class="list-item">
-          <div>
-            <div class="list-title">${getTranslatedTitle(item, "Nota de prensa")}</div>
-            <div class="list-meta">${[item.symbol, item.date].filter(Boolean).join(" · ")}</div>
-            <div class="list-meta">Fuente oficial: ${item.source || "N/D"}</div>
-          </div>
-          <a class="link" href="${item.link}" target="_blank" rel="noopener">Leer</a>
-        </div>
-      `
-        )
-        .join("");
-      dom.pressList.innerHTML = list;
+      renderItems(cached);
       return;
     }
     dom.pressList.innerHTML = `<div class="empty">${error.message}</div>`;
@@ -1159,91 +1144,59 @@ async function loadCryptoPress() {
       await fetchCryptoPress(),
       LIST_CACHE_LIMIT
     );
-    const officialItems = items.filter((item) => item.official === true);
-    const fallbackItems = items.filter((item) => item.fallback === true);
-    if (!officialItems.length) {
-      if (!fallbackItems.length) {
-        dom.cryptoPressList.innerHTML = "<div class=\"empty\">Sin NDP oficiales.</div>";
-        return;
+    const filtered = filterWindowWithLatest(
+      items,
+      CRYPTO_EVENT_WINDOW_HOURS,
+      (item) => (item.symbol || "").toString().trim()
+    );
+    renderEventList(
+      dom.cryptoPressList,
+      filtered,
+      "cryptoPress",
+      "Sin NDP oficiales.",
+      (item) => {
+        const title = getTranslatedTitle(item, "Nota de prensa");
+        const source = normalizeText(item.source, "N/D");
+        return `
+        <div class="list-item">
+          <div>
+            <div class="list-title">${title}</div>
+            <div class="list-meta">${[item.symbol, item.date].filter(Boolean).join(" · ")}</div>
+            <div class="list-meta">Fuente oficial: ${source}</div>
+          </div>
+          <a class="link" href="${item.link}" target="_blank" rel="noopener">Leer</a>
+        </div>
+      `;
       }
-      const hint =
-        "<div class=\"list-hint\">Sin NDP oficiales; mostrando ultima noticia por ticker (no oficial).</div>";
-      const list = fallbackItems
-        .map(
-          (item) => `
-        <div class="list-item">
-          <div>
-            <div class="list-title">${getTranslatedTitle(item, "Nota de prensa")}</div>
-            <div class="list-meta">${[item.symbol, item.date].filter(Boolean).join(" · ")}</div>
-            <div class="list-meta">No oficial (solo comprobacion)</div>
-          </div>
-          <a class="link" href="${item.link}" target="_blank" rel="noopener">Leer</a>
-        </div>
-      `
-        )
-        .join("");
-      dom.cryptoPressList.innerHTML = `${hint}${list}`;
-      return;
-    }
-    const list = officialItems
-      .map(
-        (item) => `
-        <div class="list-item">
-          <div>
-            <div class="list-title">${getTranslatedTitle(item, "Nota de prensa")}</div>
-            <div class="list-meta">${[item.symbol, item.date].filter(Boolean).join(" · ")}</div>
-            <div class="list-meta">Fuente oficial: ${item.source || "N/D"}</div>
-          </div>
-          <a class="link" href="${item.link}" target="_blank" rel="noopener">Leer</a>
-        </div>
-      `
-      )
-      .join("");
-    dom.cryptoPressList.innerHTML = list;
+    );
   } catch (error) {
     const cached = readListCache(CRYPTO_PRESS_STORAGE_KEY);
     if (cached.length) {
-      const officialItems = cached.filter((item) => item.official === true);
-      const fallbackItems = cached.filter((item) => item.fallback === true);
-      if (!officialItems.length) {
-        if (!fallbackItems.length) {
-          dom.cryptoPressList.innerHTML = "<div class=\"empty\">Sin NDP oficiales.</div>";
-          return;
+      const filtered = filterWindowWithLatest(
+        cached,
+        CRYPTO_EVENT_WINDOW_HOURS,
+        (item) => (item.symbol || "").toString().trim()
+      );
+      renderEventList(
+        dom.cryptoPressList,
+        filtered,
+        "cryptoPress",
+        "Sin NDP oficiales.",
+        (item) => {
+          const title = getTranslatedTitle(item, "Nota de prensa");
+          const source = normalizeText(item.source, "N/D");
+          return `
+        <div class="list-item">
+          <div>
+            <div class="list-title">${title}</div>
+            <div class="list-meta">${[item.symbol, item.date].filter(Boolean).join(" · ")}</div>
+            <div class="list-meta">Fuente oficial: ${source}</div>
+          </div>
+          <a class="link" href="${item.link}" target="_blank" rel="noopener">Leer</a>
+        </div>
+      `;
         }
-        const hint =
-          "<div class=\"list-hint\">Sin NDP oficiales; mostrando ultima noticia por ticker (no oficial).</div>";
-        const list = fallbackItems
-          .map(
-            (item) => `
-        <div class="list-item">
-          <div>
-            <div class="list-title">${getTranslatedTitle(item, "Nota de prensa")}</div>
-            <div class="list-meta">${[item.symbol, item.date].filter(Boolean).join(" · ")}</div>
-            <div class="list-meta">No oficial (solo comprobacion)</div>
-          </div>
-          <a class="link" href="${item.link}" target="_blank" rel="noopener">Leer</a>
-        </div>
-      `
-          )
-          .join("");
-        dom.cryptoPressList.innerHTML = `${hint}${list}`;
-        return;
-      }
-      const list = officialItems
-        .map(
-          (item) => `
-        <div class="list-item">
-          <div>
-            <div class="list-title">${getTranslatedTitle(item, "Nota de prensa")}</div>
-            <div class="list-meta">${[item.symbol, item.date].filter(Boolean).join(" · ")}</div>
-            <div class="list-meta">Fuente oficial: ${item.source || "N/D"}</div>
-          </div>
-          <a class="link" href="${item.link}" target="_blank" rel="noopener">Leer</a>
-        </div>
-      `
-        )
-        .join("");
-      dom.cryptoPressList.innerHTML = list;
+      );
       return;
     }
     dom.cryptoPressList.innerHTML = `<div class="empty">${error.message}</div>`;
@@ -1259,13 +1212,17 @@ async function loadCryptoNews() {
       await fetchCryptoNews(),
       LIST_CACHE_LIMIT
     );
-    if (!items.length) {
-      dom.cryptoNewsList.innerHTML =
-        "<div class=\"empty\">Sin noticias cripto recientes.</div>";
-      return;
-    }
-    dom.cryptoNewsList.innerHTML = items
-      .map((item) => {
+    const filtered = filterWindowWithLatest(
+      items,
+      CRYPTO_EVENT_WINDOW_HOURS,
+      (item) => formatCryptoNewsSymbol(item.symbol)
+    );
+    renderEventList(
+      dom.cryptoNewsList,
+      filtered,
+      "cryptoNews",
+      "Sin noticias cripto recientes.",
+      (item) => {
         const classification = formatClassification(item.classification);
         const impact = formatImpact(item.impact);
         const ignore = formatIgnoreFlag(item.ignore);
@@ -1282,13 +1239,22 @@ async function loadCryptoNews() {
           <a class="link" href="${item.link}" target="_blank" rel="noopener">Leer</a>
         </div>
       `;
-      })
-      .join("");
+      }
+    );
   } catch (error) {
     const cached = readListCache(CRYPTO_NEWS_STORAGE_KEY);
     if (cached.length) {
-      dom.cryptoNewsList.innerHTML = cached
-        .map((item) => {
+      const filtered = filterWindowWithLatest(
+        cached,
+        CRYPTO_EVENT_WINDOW_HOURS,
+        (item) => formatCryptoNewsSymbol(item.symbol)
+      );
+      renderEventList(
+        dom.cryptoNewsList,
+        filtered,
+        "cryptoNews",
+        "Sin noticias cripto recientes.",
+        (item) => {
           const classification = formatClassification(item.classification);
           const impact = formatImpact(item.impact);
           const ignore = formatIgnoreFlag(item.ignore);
@@ -1305,8 +1271,8 @@ async function loadCryptoNews() {
           <a class="link" href="${item.link}" target="_blank" rel="noopener">Leer</a>
         </div>
       `;
-        })
-        .join("");
+        }
+      );
       return;
     }
     dom.cryptoNewsList.innerHTML = `<div class="empty">${error.message}</div>`;
@@ -1544,6 +1510,18 @@ function init() {
       if (action === "reset") resetAlert(id);
     });
   }
+  document.addEventListener("click", (event) => {
+    const target = event.target;
+    const button = target && target.closest
+      ? target.closest("[data-toggle]")
+      : null;
+    const toggle = button && button.dataset ? button.dataset.toggle : null;
+    if (!toggle || !(toggle in listExpansion)) return;
+    listExpansion[toggle] = !listExpansion[toggle];
+    if (toggle === "filings") loadFilings();
+    if (toggle === "press") loadPress();
+    if (toggle === "news") loadNews();
+  });
   startTimers();
   updateStocks();
   updateCryptos();

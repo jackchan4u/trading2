@@ -574,6 +574,38 @@ def _apply_title_translations(items):
     return items
 
 
+def _apply_event_title_translations(events):
+    settings = _get_translation_settings()
+    if not settings or not events:
+        return events
+    titles = []
+    indexed = []
+    for event in events:
+        resumen = event.get("resumen")
+        if not isinstance(resumen, dict):
+            continue
+        title = resumen.get("titulo")
+        if not title:
+            continue
+        normalized = str(title).strip()
+        if not normalized:
+            continue
+        titles.append(normalized)
+        indexed.append((event, normalized))
+    if not titles:
+        return events
+    translations = _translate_texts(titles, settings)
+    for event, normalized in indexed:
+        translated = translations.get(normalized)
+        if translated and translated != normalized:
+            resumen = event.get("resumen") or {}
+            if isinstance(resumen, dict):
+                resumen["tituloTranslated"] = translated
+            else:
+                event["resumen"] = {"tituloTranslated": translated}
+    return events
+
+
 def _analysis_cache_get(key):
     cached = _analysis_cache.get(key)
     if not cached:
@@ -873,6 +905,13 @@ def _is_target_filing_form(form):
     return str(form).strip().upper() in TARGET_FILING_FORMS
 
 
+def _is_event_filing_form(form):
+    if not form:
+        return False
+    value = str(form).strip().upper()
+    return value.startswith("144") or value.startswith("4") or value.startswith("8-K")
+
+
 def _extract_first_number(pattern, text):
     if not text:
         return None
@@ -962,7 +1001,7 @@ def _fallback_filing_analysis(item, content):
         impact = "medio"
     summary = f"{symbol} presento {form} el {date}. Evento: {event_type}."
     if insider_action not in ("no aplica", "desconocido"):
-        summary = f"{summary} Insider: {insider_action}."
+        summary = f"{summary} Accion insider: {insider_action}."
     return {
         "summary": summary.strip(),
         "impact": impact,
@@ -1224,7 +1263,7 @@ def _parse_form4_text(text):
         txn_type = "option exercise"
     elif "rsu" in lowered or "restricted stock" in lowered or "award" in lowered:
         txn_type = "rsu/award"
-    event_type = "Insider buying" if action == "compra" else "Insider selling"
+    event_type = "Compra insider" if action == "compra" else "Venta insider"
     summary = f"Form 4: {event_type}. Acciones: {shares}."
     if price:
         summary = f"{summary} Precio medio: {price}."
@@ -1301,9 +1340,9 @@ def _extract_form4_role(text):
     if re.search(r"X\\s+Director", text, re.IGNORECASE):
         roles.append("Director")
     if re.search(r"X\\s+Officer", text, re.IGNORECASE):
-        roles.append("Officer")
+        roles.append("Ejecutivo")
     if re.search(r"X\\s+10%\\s+Owner", text, re.IGNORECASE):
-        roles.append("10% Owner")
+        roles.append("Accionista 10%")
     return ", ".join(roles)
 
 
@@ -1338,9 +1377,9 @@ def _extract_form144_seller_role(normalized):
         if re.search(r"Relationship to Issuer\s+Director", normalized, re.IGNORECASE) or re.search(r"\bDirector\b", normalized):
             role_parts.append("Director")
         if re.search(r"Relationship to Issuer\s+Officer", normalized, re.IGNORECASE) or re.search(r"\bOfficer\b", normalized):
-            role_parts.append("Officer")
+            role_parts.append("Ejecutivo")
         if re.search(r"10% Stockholder", normalized, re.IGNORECASE):
-            role_parts.append("10% Stockholder")
+            role_parts.append("Accionista 10%")
         if role_parts:
             role = ", ".join(role_parts)
     return seller, role
@@ -1398,7 +1437,7 @@ def _parse_form144_text(text):
         )
     if not (seller or shares or value or date_raw):
         return None
-    summary = "Form 144: Insider proposed sale."
+    summary = "Form 144: Venta insider propuesta."
     if seller:
         summary = f"{summary} Vendedor: {seller}."
     if shares:
@@ -1408,7 +1447,7 @@ def _parse_form144_text(text):
     if date_raw:
         summary = f"{summary} Fecha estimada: {date_raw}."
     return {
-        "event_type": "Insider proposed sale",
+        "event_type": "Venta insider propuesta",
         "insider_action": "venta",
         "insider_role": role or "",
         "shares": shares,
@@ -1486,13 +1525,13 @@ def _parse_form4_payload(payload):
                 if t["action"] == "sell" and t["price"] is not None
             )
             if buy_shares >= sell_shares:
-                event_type = "Insider buying"
+                event_type = "Compra insider"
                 shares = buy_shares
                 value = buy_value if buy_value else None
                 avg_price = (buy_value / buy_shares) if buy_shares and buy_value else None
                 action = "compra" if sell_shares == 0 else "mixto"
             else:
-                event_type = "Insider selling"
+                event_type = "Venta insider"
                 shares = sell_shares
                 value = sell_value if sell_value else None
                 avg_price = (sell_value / sell_shares) if sell_shares and sell_value else None
@@ -1543,12 +1582,12 @@ def _parse_form4_payload(payload):
             role_parts.append("Director")
         if is_officer:
             role_parts.append(
-                f"Officer ({officer_title})" if officer_title else "Officer"
+                f"Ejecutivo ({officer_title})" if officer_title else "Ejecutivo"
             )
         if is_ten:
-            role_parts.append("10% Owner")
+            role_parts.append("Accionista 10%")
         if is_other:
-            role_parts.append(other_text or "Other")
+            role_parts.append(other_text or "Otro")
         if role_parts:
             roles.append(", ".join(role_parts))
     transactions = []
@@ -1604,13 +1643,13 @@ def _parse_form4_payload(payload):
         if t["action"] == "sell" and t["price"] is not None
     )
     if buy_shares >= sell_shares:
-        event_type = "Insider buying"
+        event_type = "Compra insider"
         shares = buy_shares
         value = buy_value if buy_value else None
         avg_price = (buy_value / buy_shares) if buy_shares and buy_value else None
         action = "compra" if sell_shares == 0 else "mixto"
     else:
-        event_type = "Insider selling"
+        event_type = "Venta insider"
         shares = sell_shares
         value = sell_value if sell_value else None
         avg_price = (sell_value / sell_shares) if sell_shares and sell_value else None
@@ -1767,7 +1806,7 @@ def _parse_form144_payload(payload):
                     ["estimateddateofsale", "dateofsale", "saledate"],
                 )
         if seller or shares or value or date_raw:
-            summary = "Form 144: Insider proposed sale."
+            summary = "Form 144: Venta insider propuesta."
             if seller:
                 summary = f"{summary} Vendedor: {seller}."
             if shares:
@@ -1777,7 +1816,7 @@ def _parse_form144_payload(payload):
             if date_raw:
                 summary = f"{summary} Fecha estimada: {date_raw}."
             return {
-                "event_type": "Insider proposed sale",
+                "event_type": "Venta insider propuesta",
                 "insider_action": "venta",
                 "insider_role": role or "",
                 "shares": shares,
@@ -1840,7 +1879,7 @@ def _parse_form144_payload(payload):
     )
     shares = _parse_number_value(shares_raw)
     value = _parse_number_value(value_raw)
-    summary = "Form 144: Insider proposed sale."
+    summary = "Form 144: Venta insider propuesta."
     if seller:
         summary = f"{summary} Vendedor: {seller}."
     if shares:
@@ -1850,7 +1889,7 @@ def _parse_form144_payload(payload):
     if date_raw:
         summary = f"{summary} Fecha estimada: {date_raw}."
     return {
-        "event_type": "Insider proposed sale",
+        "event_type": "Venta insider propuesta",
         "insider_action": "venta",
         "insider_role": role or "",
         "shares": shares,
@@ -2314,6 +2353,107 @@ def _parse_rss_date(value):
         return None
 
 
+def _event_cutoff_timestamp():
+    hours = max(1, EVENT_WINDOW_HOURS)
+    return time.time() - (hours * 3600)
+
+
+def _format_event_date(date_value, timestamp):
+    if timestamp:
+        return datetime.fromtimestamp(timestamp, tz=ZoneInfo("UTC")).isoformat()
+    return date_value or ""
+
+
+def _normalize_impact(value, fallback="bajo"):
+    text = (value or "").strip().lower()
+    if text in ("bajo", "medio", "alto"):
+        return text
+    return fallback
+
+
+def _classify_event_impact(title, default_level):
+    text = (title or "").lower()
+    high_terms = (
+        "earnings",
+        "results",
+        "guidance",
+        "acquisition",
+        "merger",
+        "m&a",
+        "offering",
+        "bankruptcy",
+        "restructuring",
+        "default",
+        "investigation",
+        "restatement",
+        "dividend",
+        "split",
+        "reverse split",
+    )
+    medium_terms = (
+        "partnership",
+        "contract",
+        "launch",
+        "product",
+        "appoints",
+        "appoint",
+        "expands",
+        "agreement",
+    )
+    if any(term in text for term in high_terms):
+        return "alto"
+    if any(term in text for term in medium_terms):
+        return "medio"
+    return default_level
+
+
+def _classify_dilutive_from_title(title):
+    text = (title or "").lower()
+    dilutive_terms = (
+        "offering",
+        "public offering",
+        "registered offering",
+        "private placement",
+        "secondary offering",
+        "equity",
+        "shares",
+    )
+    potential_terms = (
+        "shelf",
+        "atm",
+        "at-the-market",
+        "convertible",
+        "warrant",
+    )
+    if any(term in text for term in dilutive_terms):
+        return "si"
+    if any(term in text for term in potential_terms):
+        return "potencial"
+    return "no"
+
+
+def _filing_event_type(form):
+    form = (form or "").upper()
+    if form.startswith("144"):
+        return "SEC_144"
+    if form.startswith("4"):
+        return "SEC_4"
+    if form.startswith("8-K"):
+        return "SEC_8K"
+    return "SEC_OTHER"
+
+
+def _filing_dilutive_label(form, dilutive_flag):
+    form = (form or "").upper()
+    if form.startswith("144"):
+        return "potencial"
+    if form.startswith("4"):
+        return "no"
+    if form.startswith("8-K"):
+        return "si" if dilutive_flag else "no"
+    return "no"
+
+
 def _get_news_stream(symbols):
     items = []
     for symbol in symbols:
@@ -2394,6 +2534,7 @@ PRESS_FEED_TIMEOUT = int(os.environ.get("PRESS_FEED_TIMEOUT", "4"))
 PRESS_PAGE_TIMEOUT = int(os.environ.get("PRESS_PAGE_TIMEOUT", "6"))
 PRESS_FETCH_BUDGET_SEC = int(os.environ.get("PRESS_FETCH_BUDGET_SEC", "12"))
 PRESS_MAX_AGE_HOURS = int(os.environ.get("PRESS_MAX_AGE_HOURS", "0"))
+EVENT_WINDOW_HOURS = int(os.environ.get("EVENT_WINDOW_HOURS", "24"))
 
 
 def _press_fallback_latest_enabled():
@@ -2816,14 +2957,18 @@ def _collect_anchor_press_items(payload, page_url):
     return items
 
 
-def _fetch_press_page_items(page_url, symbol):
-    cached = _press_page_cache_get(page_url)
-    if cached is not None:
-        return [dict(item, symbol=symbol) for item in cached]
+def _fetch_press_page_items(page_url, symbol, use_cache=True, raise_errors=False):
+    if use_cache:
+        cached = _press_page_cache_get(page_url)
+        if cached is not None:
+            return [dict(item, symbol=symbol) for item in cached]
     try:
         payload = _fetch_text(page_url, PRESS_PAGE_HEADERS, timeout=PRESS_PAGE_TIMEOUT)
     except Exception:
-        _press_page_cache_set(page_url, [])
+        if raise_errors:
+            raise
+        if use_cache:
+            _press_page_cache_set(page_url, [])
         return []
     items = _collect_json_ld_press_items(payload, page_url)
     if not items:
@@ -2848,7 +2993,8 @@ def _fetch_press_page_items(page_url, symbol):
                 "feedUrl": page_url,
             }
         )
-    _press_page_cache_set(page_url, normalized)
+    if use_cache:
+        _press_page_cache_set(page_url, normalized)
     return normalized
 
 
@@ -2899,18 +3045,22 @@ def _parse_feed_items(payload):
     return items
 
 
-def _fetch_press_feed_items(url, symbol):
-    cached = _press_feed_cache_get(url)
-    if cached is None:
+def _fetch_press_feed_items(url, symbol, use_cache=True, raise_errors=False):
+    parsed = None
+    if use_cache:
+        parsed = _press_feed_cache_get(url)
+    if parsed is None:
         try:
             payload = _fetch_text(url, PRESS_FEED_HEADERS, timeout=PRESS_FEED_TIMEOUT)
         except Exception:
-            _press_feed_cache_set(url, [])
+            if raise_errors:
+                raise
+            if use_cache:
+                _press_feed_cache_set(url, [])
             return []
         parsed = _parse_feed_items(payload)
-        _press_feed_cache_set(url, parsed)
-    else:
-        parsed = cached
+        if use_cache:
+            _press_feed_cache_set(url, parsed)
     if not parsed:
         return []
     default_source = urllib.parse.urlparse(url).netloc or url
@@ -3082,6 +3232,412 @@ def _get_press_stream(symbols):
     return deduped
 
 
+def _build_filing_event(item):
+    symbol = (item.get("symbol") or item.get("ticker") or "").upper()
+    form = item.get("form") or item.get("form_type") or ""
+    timestamp = item.get("timestamp") or _parse_iso_date(item.get("date")) or 0
+    impact = _normalize_impact(item.get("impact"), "medio")
+    dilutive = _filing_dilutive_label(form, bool(item.get("dilutive")))
+    summary = {
+        "titulo": item.get("summary") or item.get("event_type") or form or "SEC filing",
+        "link": item.get("link") or item.get("url") or "",
+        "form": form,
+        "detalle": {
+            "evento": item.get("event_type") or "",
+            "insider": item.get("insider_role") or item.get("insiderRole") or "",
+            "accion": item.get("insider_action") or item.get("insiderAction") or "",
+            "acciones": item.get("shares"),
+            "valor_usd": (
+                item.get("value_usd")
+                if item.get("value_usd") is not None
+                else item.get("value")
+            ),
+            "items": item.get("items") or [],
+            "material": item.get("material"),
+            "error": item.get("documentError") or "",
+        },
+    }
+    return {
+        "ticker": symbol,
+        "tipo_evento": _filing_event_type(form),
+        "impacto": impact,
+        "dilutivo": dilutive,
+        "fecha_evento": _format_event_date(item.get("date"), timestamp),
+        "resumen": summary,
+    }
+
+
+def _build_press_event(item):
+    symbol = (item.get("symbol") or "").upper()
+    title = item.get("title") or ""
+    timestamp = item.get("timestamp") or _parse_rss_date(item.get("date")) or 0
+    return {
+        "ticker": symbol,
+        "tipo_evento": "PRESS_RELEASE",
+        "impacto": _classify_event_impact(title, "medio"),
+        "dilutivo": _classify_dilutive_from_title(title),
+        "fecha_evento": _format_event_date(item.get("date"), timestamp),
+        "resumen": {
+            "titulo": title,
+            "link": item.get("link") or "",
+            "fuente": item.get("source") or "",
+        },
+    }
+
+
+def _build_news_event(item):
+    symbol = (item.get("symbol") or "").upper()
+    title = item.get("title") or ""
+    timestamp = item.get("timestamp") or _parse_rss_date(item.get("date")) or 0
+    return {
+        "ticker": symbol,
+        "tipo_evento": "NEWS",
+        "impacto": _classify_event_impact(title, "bajo"),
+        "dilutivo": _classify_dilutive_from_title(title),
+        "fecha_evento": _format_event_date(item.get("date"), timestamp),
+        "resumen": {
+            "titulo": title,
+            "link": item.get("link") or "",
+            "fuente": item.get("source") or "",
+        },
+    }
+
+
+def _event_dedupe_key(event):
+    resumen = event.get("resumen") or {}
+    link = resumen.get("link") or ""
+    if link:
+        return (event.get("ticker"), event.get("tipo_evento"), link)
+    return (
+        event.get("ticker"),
+        event.get("tipo_evento"),
+        event.get("fecha_evento"),
+    )
+
+
+def _dedupe_errors(errors):
+    deduped = []
+    seen = set()
+    for entry in errors:
+        key = (
+            entry.get("ticker"),
+            entry.get("fuente"),
+            entry.get("error"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(entry)
+    return deduped
+
+
+def _pick_latest_event(events):
+    if not events:
+        return None
+    return max(events, key=lambda entry: entry[0] or 0)
+
+
+def _get_latest_filing_event(symbol):
+    raw_items = _get_recent_filings(symbol, None, max_items=1)
+    if not raw_items:
+        return None
+    processed = _process_filings(raw_items)
+    if not processed:
+        return None
+    item = processed[0]
+    timestamp = item.get("timestamp") or _parse_iso_date(item.get("date")) or 0
+    return (timestamp, _build_filing_event(item))
+
+
+def _get_recent_filings(symbol, cutoff_ts, max_items=None):
+    symbol = symbol.upper()
+    cik_map = _get_cik_map()
+    cik = cik_map.get(symbol)
+    if not cik:
+        raise ValueError("No hay CIK para este ticker")
+
+    url = SEC_SUBMISSION_URL.format(cik=cik)
+    data = _fetch_json(url, _sec_headers())
+    filings = data.get("filings", {}).get("recent", {})
+    accession_numbers = filings.get("accessionNumber", [])
+    forms = filings.get("form", [])
+    dates = filings.get("filingDate", [])
+    primary_docs = filings.get("primaryDocument", [])
+
+    items = []
+    for idx in range(len(accession_numbers)):
+        accession = accession_numbers[idx]
+        form = forms[idx] if idx < len(forms) else ""
+        if not _is_event_filing_form(form):
+            continue
+        date = dates[idx] if idx < len(dates) else ""
+        timestamp = _parse_iso_date(date) or 0
+        if cutoff_ts and timestamp and timestamp < cutoff_ts:
+            break
+        if cutoff_ts and not timestamp:
+            continue
+        primary = primary_docs[idx] if idx < len(primary_docs) else ""
+        accession_no = accession.replace("-", "")
+        base = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{accession_no}"
+        link = f"{base}/{primary}" if primary else f"{base}/{accession}-index.html"
+        items.append(
+            {
+                "symbol": symbol,
+                "form": form,
+                "date": date,
+                "link": link,
+                "timestamp": timestamp,
+            }
+        )
+        if max_items and len(items) >= max_items:
+            break
+    return items
+
+
+def _get_filings_events(symbols, cutoff_ts):
+    events = []
+    errors = []
+    for symbol in symbols:
+        try:
+            raw_items = _get_recent_filings(symbol, cutoff_ts)
+        except Exception as exc:
+            errors.append(
+                {
+                    "ticker": symbol,
+                    "fuente": "SEC",
+                    "error": str(exc) or "Error SEC",
+                }
+            )
+            continue
+        processed = _process_filings(raw_items)
+        for item in processed:
+            timestamp = item.get("timestamp") or _parse_iso_date(item.get("date")) or 0
+            if cutoff_ts and timestamp and timestamp < cutoff_ts:
+                continue
+            events.append((timestamp, _build_filing_event(item)))
+    return events, errors
+
+
+def _get_news_events(symbols, cutoff_ts):
+    events = []
+    errors = []
+    for symbol in symbols:
+        url = NEWS_FEED_URL.format(symbol=urllib.parse.quote(symbol))
+        try:
+            payload = _fetch_text(url, NEWS_HEADERS)
+            root = ET.fromstring(payload)
+        except Exception as exc:
+            errors.append(
+                {
+                    "ticker": symbol,
+                    "fuente": "NEWS",
+                    "error": str(exc) or "Error News",
+                }
+            )
+            continue
+        for item in root.findall(".//item"):
+            title = item.findtext("title") or ""
+            link = item.findtext("link") or ""
+            date = item.findtext("pubDate") or ""
+            source = item.findtext("source") or ""
+            timestamp = _parse_rss_date(date) or 0
+            if cutoff_ts and timestamp and timestamp < cutoff_ts:
+                continue
+            if cutoff_ts and not timestamp:
+                continue
+            events.append(
+                (
+                    timestamp,
+                    _build_news_event(
+                        {
+                            "title": title,
+                            "link": link,
+                            "date": date,
+                            "source": source,
+                            "symbol": symbol,
+                            "timestamp": timestamp,
+                        }
+                    ),
+                )
+            )
+    return events, errors
+
+
+def _get_press_events(symbols, cutoff_ts):
+    events = []
+    errors = []
+    start_time = time.time()
+    for symbol in symbols:
+        if (time.time() - start_time) >= PRESS_FETCH_BUDGET_SEC:
+            errors.append(
+                {
+                    "ticker": symbol,
+                    "fuente": "PRESS",
+                    "error": "Tiempo de lectura agotado",
+                }
+            )
+            continue
+        feed_urls = _get_press_feed_urls_for_symbol(symbol)
+        source_pages = _get_press_source_pages_for_symbol(symbol)
+        items = []
+        for page in source_pages:
+            if (time.time() - start_time) >= PRESS_FETCH_BUDGET_SEC:
+                break
+            discovered = _discover_feed_urls(page)
+            if discovered:
+                feed_urls.extend(discovered)
+                continue
+            try:
+                page_items = _fetch_press_page_items(
+                    page,
+                    symbol,
+                    use_cache=False,
+                    raise_errors=True,
+                )
+            except Exception as exc:
+                errors.append(
+                    {
+                        "ticker": symbol,
+                        "fuente": "PRESS",
+                        "error": str(exc) or "Error Press Page",
+                    }
+                )
+                continue
+            items.extend(page_items)
+        feed_urls = list(dict.fromkeys([url for url in feed_urls if url]))
+        for url in feed_urls:
+            if (time.time() - start_time) >= PRESS_FETCH_BUDGET_SEC:
+                break
+            try:
+                feed_items = _fetch_press_feed_items(
+                    url,
+                    symbol,
+                    use_cache=False,
+                    raise_errors=True,
+                )
+            except Exception as exc:
+                errors.append(
+                    {
+                        "ticker": symbol,
+                        "fuente": "PRESS",
+                        "error": str(exc) or "Error Press Feed",
+                    }
+                )
+                continue
+            items.extend(feed_items)
+        for item in items:
+            timestamp = (
+                item.get("timestamp")
+                or _parse_rss_date(item.get("date"))
+                or _parse_iso_date(item.get("date"))
+                or 0
+            )
+            if cutoff_ts and timestamp and timestamp < cutoff_ts:
+                continue
+            if cutoff_ts and not timestamp:
+                continue
+            item["timestamp"] = timestamp
+            events.append((timestamp, _build_press_event(item)))
+    return events, errors
+
+
+def _get_events(symbols):
+    cutoff_ts = _event_cutoff_timestamp()
+    events = []
+    errors = []
+
+    filings_events, filings_errors = _get_filings_events(symbols, cutoff_ts)
+    press_events, press_errors = _get_press_events(symbols, cutoff_ts)
+    news_events, news_errors = _get_news_events(symbols, cutoff_ts)
+
+    events.extend(filings_events)
+    events.extend(press_events)
+    events.extend(news_events)
+    errors.extend(filings_errors)
+    errors.extend(press_errors)
+    errors.extend(news_errors)
+
+    tickers_with_filings = {
+        entry.get("ticker")
+        for _, entry in filings_events
+        if entry.get("ticker")
+    }
+    tickers_with_press = {
+        entry.get("ticker")
+        for _, entry in press_events
+        if entry.get("ticker")
+    }
+    tickers_with_news = {
+        entry.get("ticker")
+        for _, entry in news_events
+        if entry.get("ticker")
+    }
+
+    missing_filings = [
+        symbol for symbol in symbols if symbol not in tickers_with_filings
+    ]
+    for symbol in missing_filings:
+        try:
+            filing_event = _get_latest_filing_event(symbol)
+        except Exception as exc:
+            errors.append(
+                {
+                    "ticker": symbol,
+                    "fuente": "SEC",
+                    "error": str(exc) or "Error SEC",
+                }
+            )
+            filing_event = None
+        if filing_event:
+            events.append(filing_event)
+
+    missing_press = [
+        symbol for symbol in symbols if symbol not in tickers_with_press
+    ]
+    if missing_press:
+        extra_press_events, press_errors = _get_press_events(missing_press, None)
+        errors.extend(press_errors)
+        latest_press = {}
+        for entry in extra_press_events:
+            timestamp, event = entry
+            ticker = event.get("ticker")
+            if not ticker:
+                continue
+            current = latest_press.get(ticker)
+            if not current or (timestamp or 0) > (current[0] or 0):
+                latest_press[ticker] = entry
+        events.extend(latest_press.values())
+
+    missing_news = [
+        symbol for symbol in symbols if symbol not in tickers_with_news
+    ]
+    if missing_news:
+        extra_news_events, news_errors = _get_news_events(missing_news, None)
+        errors.extend(news_errors)
+        latest_news = {}
+        for entry in extra_news_events:
+            timestamp, event = entry
+            ticker = event.get("ticker")
+            if not ticker:
+                continue
+            current = latest_news.get(ticker)
+            if not current or (timestamp or 0) > (current[0] or 0):
+                latest_news[ticker] = entry
+        events.extend(latest_news.values())
+
+    events.sort(key=lambda entry: entry[0] or 0, reverse=True)
+    deduped = []
+    seen = set()
+    for _, event in events:
+        key = _event_dedupe_key(event)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(event)
+    _apply_event_title_translations(deduped)
+    return deduped, _dedupe_errors(errors)
+
+
 def _parse_stooq_csv(payload):
     lines = [line.strip() for line in payload.splitlines() if line.strip()]
     if len(lines) < 2:
@@ -3199,86 +3755,41 @@ def _fetch_nasdaq_quote(symbol):
         data.get("lastSalePrice"),
         data.get("price"),
     )
-    change = _nasdaq_first_number(
-        primary.get("netChange"),
-        primary.get("change"),
-        data.get("netChange"),
-        data.get("change"),
-    )
-    change_percent = _nasdaq_first_number(
-        primary.get("percentageChange"),
-        primary.get("changePercent"),
-        data.get("percentageChange"),
-        data.get("changePercent"),
-    )
-    previous_close = _nasdaq_first_number(
-        data.get("previousClose"),
-        data.get("previousClosePrice"),
-        data.get("prevClose"),
-    )
     extended_price = _nasdaq_first_number(
         data.get("extendedMarketPrice"),
         extended.get("lastSalePrice"),
         extended.get("price"),
     )
-    extended_change = _nasdaq_first_number(
-        data.get("extendedMarketChange"),
-        extended.get("netChange"),
-        extended.get("change"),
-    )
-    extended_percent = _nasdaq_first_number(
-        data.get("extendedMarketPercentageChange"),
-        extended.get("percentageChange"),
-        extended.get("changePercent"),
-    )
 
     if market_state in ("premarket", "after") and extended_price is not None:
         price = extended_price
-        if extended_change is not None:
-            change = extended_change
-        if extended_percent is not None:
-            change_percent = extended_percent
-
-    if previous_close is None:
-        summary_url = NASDAQ_SUMMARY_URL.format(
-            symbol=urllib.parse.quote(symbol)
-        )
-        try:
-            summary_payload = _fetch_nasdaq_json(summary_url)
-        except Exception:
-            summary_payload = None
-        previous_close = _nasdaq_previous_close_from_summary(summary_payload)
-
-    if previous_close is None and price is not None and change is not None:
-        previous_close = price - change
-    if change is None and price is not None and previous_close is not None:
-        change = price - previous_close
-    if (
-        change_percent is None
-        and change is not None
-        and previous_close
-    ):
-        change_percent = (change / previous_close) * 100
-    if (
-        change is None
-        and price is not None
-        and change_percent is not None
-    ):
-        base = 1 + (change_percent / 100)
-        if base:
-            if previous_close is None:
-                previous_close = price / base
-            if previous_close is not None:
-                change = price - previous_close
 
     if price is None:
         return None
+
+    summary_url = NASDAQ_SUMMARY_URL.format(
+        symbol=urllib.parse.quote(symbol)
+    )
+    try:
+        summary_payload = _fetch_nasdaq_json(summary_url)
+    except Exception:
+        summary_payload = None
+    previous_close = _nasdaq_previous_close_from_summary(summary_payload)
+    change = None
+    change_percent = None
+    baseline_error = ""
+    if previous_close is None or previous_close == 0:
+        baseline_error = "Error baseline: cierre NASDAQ no disponible"
+    else:
+        change = price - previous_close
+        change_percent = (change / previous_close) * 100
 
     return {
         "price": price,
         "change": change,
         "changePercent": change_percent,
         "previousClose": previous_close,
+        "baselineError": baseline_error,
         "marketState": market_state or _market_state(),
     }
 
@@ -3641,16 +4152,19 @@ def api_stocks():
     refresh_list = []
     error_message = None
     with _refresh_lock:
-        if provider == "twelvedata":
-            refresh_budget = _available_credits()
-            rotation_list = _rotation_batch(
-                symbols, min(8, TWELVE_CREDITS_PER_MINUTE, len(symbols))
-            )
+        if provider == "nasdaq":
+            refresh_list = list(symbols)
         else:
-            refresh_budget = len(symbols)
-            rotation_list = list(symbols)
-        refresh_candidates = _eligible_symbols(rotation_list)
-        refresh_list = refresh_candidates[:refresh_budget]
+            if provider == "twelvedata":
+                refresh_budget = _available_credits()
+                rotation_list = _rotation_batch(
+                    symbols, min(8, TWELVE_CREDITS_PER_MINUTE, len(symbols))
+                )
+            else:
+                refresh_budget = len(symbols)
+                rotation_list = list(symbols)
+            refresh_candidates = _eligible_symbols(rotation_list)
+            refresh_list = refresh_candidates[:refresh_budget]
         if refresh_list:
             try:
                 if provider == "twelvedata":
@@ -3768,6 +4282,22 @@ def api_press():
         data = _get_press_stream(symbols)
         _apply_title_translations(data)
         return jsonify({"data": data})
+    except Exception as exc:
+        return jsonify({"error": str(exc) or "Error API"}), 502
+
+
+@app.route("/events")
+def api_events():
+    symbols = parse_symbols()
+    try:
+        data, errors = _get_events(symbols)
+        return jsonify(
+            {
+                "data": data,
+                "errors": errors,
+                "meta": {"windowHours": EVENT_WINDOW_HOURS},
+            }
+        )
     except Exception as exc:
         return jsonify({"error": str(exc) or "Error API"}), 502
 
