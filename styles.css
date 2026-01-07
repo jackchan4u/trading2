@@ -191,6 +191,10 @@ h1 {
   grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
 }
 
+.grid--main {
+  grid-template-columns: minmax(720px, 1.7fr) minmax(320px, 1fr);
+}
+
 .card {
   background: var(--card);
   border-radius: 20px;
@@ -259,11 +263,11 @@ h1 {
 }
 
 .row.stocks {
-  grid-template-columns: 1.1fr 1fr 1fr 0.7fr 0.9fr 0.8fr 1fr;
+  grid-template-columns: 1.1fr 1fr 1fr 0.8fr 1fr 1fr 1fr 0.9fr;
 }
 
 .row.crypto {
-  grid-template-columns: 1.1fr 1fr 1fr 0.7fr 0.9fr 1fr;
+  grid-template-columns: 1.1fr 1fr 1fr 1fr;
 }
 
 .row.head {

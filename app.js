@@ -114,6 +114,10 @@ const formatPercent = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 2,
 });
 
+const formatInteger = new Intl.NumberFormat("en-US", {
+  maximumFractionDigits: 0,
+});
+
 const sessionLabels = {
   premarket: "Pre-mercado",
   open: "Mercado",
@@ -124,6 +128,24 @@ const sessionLabels = {
 function formatNumber(value, digits = 2) {
   if (!Number.isFinite(value)) return "--";
   return value.toFixed(digits);
+}
+
+function toNumberOrNaN(value) {
+  if (value === null || value === undefined || value === "") {
+    return NaN;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : NaN;
+}
+
+function formatVolume(value) {
+  if (!Number.isFinite(value)) return "--";
+  return formatInteger.format(Math.round(value));
+}
+
+function formatRange(low, high) {
+  if (!Number.isFinite(low) || !Number.isFinite(high)) return "--";
+  return `${formatNumber(low, 2)} - ${formatNumber(high, 2)}`;
 }
 
 function formatPrice(value) {
@@ -539,9 +561,10 @@ function createRow(symbol, variant) {
       <div class="symbol" data-label="Simbolo">${symbol}</div>
       <div class="price" data-label="Precio">--</div>
       <div class="change neutral" data-label="Variacion">--</div>
-      <div class="rsi" data-label="RSI">--</div>
-      <div class="macd" data-label="MACD">--</div>
       <div class="session" data-label="Sesion">--</div>
+      <div class="volume" data-label="Volumen">--</div>
+      <div class="week-range" data-label="Rango 52s">--</div>
+      <div class="day-range" data-label="Rango dia">--</div>
       <div class="time" data-label="Actualizado">--</div>
     `;
   } else {
@@ -549,8 +572,6 @@ function createRow(symbol, variant) {
       <div class="symbol" data-label="Par">${symbol}</div>
       <div class="price" data-label="Precio">--</div>
       <div class="change neutral" data-label="Variacion">--</div>
-      <div class="rsi" data-label="RSI">--</div>
-      <div class="macd" data-label="MACD">--</div>
       <div class="time" data-label="Actualizado">--</div>
     `;
   }
@@ -560,21 +581,23 @@ function createRow(symbol, variant) {
 function updateRow(row, payload) {
   const priceEl = row.querySelector(".price");
   const changeEl = row.querySelector(".change");
-  const rsiEl = row.querySelector(".rsi");
-  const macdEl = row.querySelector(".macd");
   const sessionEl = row.querySelector(".session");
+  const volumeEl = row.querySelector(".volume");
+  const weekRangeEl = row.querySelector(".week-range");
+  const dayRangeEl = row.querySelector(".day-range");
   const timeEl = row.querySelector(".time");
 
   if (payload.error) {
     priceEl.textContent = "--";
     changeEl.textContent = payload.error;
     changeEl.className = "change neutral";
-    if (rsiEl) rsiEl.textContent = "--";
-    if (macdEl) macdEl.textContent = "--";
     if (sessionEl) {
       sessionEl.textContent = "--";
       sessionEl.className = "session";
     }
+    if (volumeEl) volumeEl.textContent = "--";
+    if (weekRangeEl) weekRangeEl.textContent = "--";
+    if (dayRangeEl) dayRangeEl.textContent = "--";
     timeEl.textContent = "--";
     return;
   }
@@ -594,24 +617,19 @@ function updateRow(row, payload) {
     }
   }
 
-  if (rsiEl) {
-    rsiEl.textContent = formatNumber(payload.rsi, 1);
-  }
-  if (macdEl) {
-    if (Number.isFinite(payload.macd)) {
-      const macd = formatNumber(payload.macd, 3);
-      const signal = Number.isFinite(payload.signal)
-        ? formatNumber(payload.signal, 3)
-        : "--";
-      macdEl.textContent = `${macd} / ${signal}`;
-    } else {
-      macdEl.textContent = "--";
-    }
-  }
-
   if (sessionEl) {
     sessionEl.textContent = formatSession(payload.session);
     sessionEl.className = `session ${payload.session || ""}`.trim();
+  }
+
+  if (volumeEl) {
+    volumeEl.textContent = formatVolume(payload.volume);
+  }
+  if (weekRangeEl) {
+    weekRangeEl.textContent = formatRange(payload.week52Low, payload.week52High);
+  }
+  if (dayRangeEl) {
+    dayRangeEl.textContent = formatRange(payload.dayLow, payload.dayHigh);
   }
 
   const updatedAtValue = payload.updatedAt;
@@ -1340,11 +1358,12 @@ async function updateStocks() {
         ? item.updatedAt * 1000
         : Date.now();
       const session = resolveMarketState(item.marketState, updatedAtMs);
-      recordHistory(symbol, price, updatedAtMs);
-      const series = getSeries(symbol);
-      const rsi = calculateRSI(series);
-      const macdData = calculateMACD(series) || {};
       const updatedAt = new Date(updatedAtMs);
+      const volume = toNumberOrNaN(item.volume);
+      const dayLow = toNumberOrNaN(item.dayLow);
+      const dayHigh = toNumberOrNaN(item.dayHigh);
+      const week52Low = toNumberOrNaN(item.week52Low);
+      const week52High = toNumberOrNaN(item.week52High);
 
       latestStocks.set(symbol, {
         symbol,
@@ -1353,15 +1372,22 @@ async function updateStocks() {
         changePercent,
         session,
         updatedAt: updatedAtMs,
+        volume,
+        dayLow,
+        dayHigh,
+        week52Low,
+        week52High,
       });
       updateRow(row, {
         price,
         change: Number.isFinite(change) ? change : 0,
         changePercent: Number.isFinite(changePercent) ? changePercent : 0,
-        rsi,
-        macd: macdData.macd,
-        signal: macdData.signal,
         session,
+        volume,
+        dayLow,
+        dayHigh,
+        week52Low,
+        week52High,
         updatedAt,
       });
       okCount += 1;
@@ -1405,11 +1431,6 @@ async function updateCryptos() {
 
       const updatedAtMs = Date.now();
       const price = Number(item.lastPrice);
-      recordHistory(pair.label, price, updatedAtMs);
-      const series = getSeries(pair.label);
-      const rsi = calculateRSI(series);
-      const macdData = calculateMACD(series) || {};
-
       const changeValue = Number(item.priceChange);
       const changePercent = normalizeChangePercent(
         Number(item.priceChangePercent),
@@ -1427,9 +1448,6 @@ async function updateCryptos() {
         price,
         change: changeValue,
         changePercent: Number.isFinite(changePercent) ? changePercent : 0,
-        rsi,
-        macd: macdData.macd,
-        signal: macdData.signal,
         updatedAt: new Date(updatedAtMs),
       });
     });

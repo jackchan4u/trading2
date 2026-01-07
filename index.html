@@ -70,7 +70,7 @@
         </div>
       </header>
 
-      <main class="grid">
+      <main class="grid grid--main">
         <section class="card">
           <div class="card__header">
             <h2>Acciones</h2>
@@ -89,9 +89,10 @@
               <div>Simbolo</div>
               <div>Precio</div>
               <div>Variacion</div>
-              <div>RSI</div>
-              <div>MACD</div>
               <div>Sesion</div>
+              <div>Volumen</div>
+              <div>Rango 52s</div>
+              <div>Rango dia</div>
               <div>Actualizado</div>
             </div>
             <div id="stocksBody" class="body"></div>
@@ -116,8 +117,6 @@
               <div>Par</div>
               <div>Precio</div>
               <div>Variacion</div>
-              <div>RSI</div>
-              <div>MACD</div>
               <div>Actualizado</div>
             </div>
             <div id="cryptoBody" class="body"></div>
@@ -196,14 +195,13 @@
       <footer class="foot">
         <p>
           Nota: los precios se actualizan de forma periodica y pueden estar
-          sujetos a limites de API. Para acciones se usa Twelve Data. El estado
-          de sesion se calcula con el horario NYSE (sin festivos). RSI y MACD
-          se calculan con el historico local que se va acumulando en el
-          navegador. Informes via SEC (requiere User-Agent con contacto en
-          config.json) y noticias via Yahoo Finance RSS.
+          sujetos a limites de API. Para acciones se usa Nasdaq. El estado de
+          sesion se calcula con el horario NYSE (sin festivos). Informes via
+          SEC (requiere User-Agent con contacto en config.json) y noticias via
+          Yahoo Finance RSS.
         </p>
       </footer>
     </div>
-    <script src="app.js?v=events6"></script>
+    <script src="app.js?v=events9"></script>
   </body>
 </html>

@@ -3709,19 +3709,76 @@ def _nasdaq_first_number(*values):
 
 
 def _nasdaq_previous_close_from_summary(payload):
+    value = _nasdaq_lookup_value(payload, "previousclose")
+    return _to_float_loose(value)
+
+
+def _nasdaq_lookup_value(payload, *keywords):
     if not isinstance(payload, dict):
         return None
     data = payload.get("data")
     if not isinstance(data, dict):
         return None
-    summary = data.get("summaryData")
-    if not isinstance(summary, dict):
-        return None
-    for key, value in summary.items():
-        key_norm = str(key).strip().lower().replace(" ", "")
-        if "previousclose" in key_norm:
-            return _to_float_loose(value)
+    sections = [
+        "summaryData",
+        "keyData",
+        "primaryData",
+        "secondaryData",
+        "marketSummary",
+    ]
+    for section_name in sections:
+        section = data.get(section_name)
+        if not isinstance(section, dict):
+            continue
+        for key, value in section.items():
+            key_norm = re.sub(r"[^a-z0-9]", "", str(key).lower())
+            if any(keyword in key_norm for keyword in keywords):
+                return value
+    for key, value in data.items():
+        if isinstance(value, dict):
+            continue
+        key_norm = re.sub(r"[^a-z0-9]", "", str(key).lower())
+        if any(keyword in key_norm for keyword in keywords):
+            return value
     return None
+
+
+def _nasdaq_summary_value(payload, *keywords):
+    return _nasdaq_lookup_value(payload, *keywords)
+
+
+def _nasdaq_parse_range(value):
+    if value is None:
+        return None, None
+    if isinstance(value, dict):
+        value = (
+            value.get("value")
+            or value.get("raw")
+            or value.get("label")
+            or value.get("text")
+        )
+    text = str(value).strip()
+    if not text:
+        return None, None
+    numbers = re.findall(r"[-+]?[0-9][0-9,]*\.?[0-9]*", text)
+    values = []
+    for raw in numbers:
+        parsed = _to_float_loose(raw)
+        if parsed is not None:
+            values.append(parsed)
+    if len(values) >= 2:
+        low = min(values[0], values[1])
+        high = max(values[0], values[1])
+        return low, high
+    return None, None
+
+
+def _nasdaq_range_from_values(*values):
+    for value in values:
+        low, high = _nasdaq_parse_range(value)
+        if low is not None and high is not None:
+            return low, high
+    return None, None
 
 
 def _fetch_nasdaq_quote(symbol):
@@ -3775,6 +3832,122 @@ def _fetch_nasdaq_quote(symbol):
     except Exception:
         summary_payload = None
     previous_close = _nasdaq_previous_close_from_summary(summary_payload)
+    summary_volume = _nasdaq_summary_value(
+        summary_payload,
+        "sharevolume",
+        "volume",
+    )
+    info_volume = _nasdaq_summary_value(payload, "sharevolume", "volume")
+    summary_day_range = _nasdaq_summary_value(
+        summary_payload,
+        "todayshighlow",
+        "todayhighlow",
+        "dayrange",
+        "dayhighlow",
+    )
+    info_day_range = _nasdaq_summary_value(
+        payload,
+        "todayshighlow",
+        "todayhighlow",
+        "dayrange",
+        "dayhighlow",
+    )
+    summary_day_high = _nasdaq_summary_value(summary_payload, "dayhigh")
+    summary_day_low = _nasdaq_summary_value(summary_payload, "daylow")
+    info_day_high = _nasdaq_summary_value(payload, "dayhigh")
+    info_day_low = _nasdaq_summary_value(payload, "daylow")
+    summary_week_range = _nasdaq_summary_value(
+        summary_payload,
+        "fiftytwoweekhighlow",
+        "fifttwoweekhighlow",
+        "52weekhighlow",
+        "52weekrange",
+        "weekrange",
+    )
+    info_week_range = _nasdaq_summary_value(
+        payload,
+        "fiftytwoweekhighlow",
+        "52weekhighlow",
+        "52weekrange",
+        "weekrange",
+    )
+    summary_week_high = _nasdaq_summary_value(
+        summary_payload,
+        "fiftytwoweekhigh",
+        "52weekhigh",
+    )
+    summary_week_low = _nasdaq_summary_value(
+        summary_payload,
+        "fiftytwoweeklow",
+        "52weeklow",
+    )
+    info_week_high = _nasdaq_summary_value(
+        payload,
+        "fiftytwoweekhigh",
+        "52weekhigh",
+    )
+    info_week_low = _nasdaq_summary_value(
+        payload,
+        "fiftytwoweeklow",
+        "52weeklow",
+    )
+    volume = _nasdaq_first_number(
+        primary.get("volume"),
+        primary.get("volumeValue"),
+        data.get("volume"),
+        summary_volume,
+        info_volume,
+    )
+    if volume is not None:
+        volume = int(volume)
+    day_low = _nasdaq_first_number(
+        primary.get("lowPrice"),
+        primary.get("low"),
+        data.get("lowPrice"),
+        data.get("low"),
+        summary_day_low,
+        info_day_low,
+    )
+    day_high = _nasdaq_first_number(
+        primary.get("highPrice"),
+        primary.get("high"),
+        data.get("highPrice"),
+        data.get("high"),
+        summary_day_high,
+        info_day_high,
+    )
+    range_day_low, range_day_high = _nasdaq_range_from_values(
+        primary.get("dayRange"),
+        data.get("dayRange"),
+        summary_day_range,
+        info_day_range,
+    )
+    if day_low is None:
+        day_low = range_day_low
+    if day_high is None:
+        day_high = range_day_high
+    week52_low = _nasdaq_first_number(
+        primary.get("fiftyTwoWeekLow"),
+        data.get("fiftyTwoWeekLow"),
+        summary_week_low,
+        info_week_low,
+    )
+    week52_high = _nasdaq_first_number(
+        primary.get("fiftyTwoWeekHigh"),
+        data.get("fiftyTwoWeekHigh"),
+        summary_week_high,
+        info_week_high,
+    )
+    range_week_low, range_week_high = _nasdaq_range_from_values(
+        primary.get("yearRange"),
+        data.get("yearRange"),
+        summary_week_range,
+        info_week_range,
+    )
+    if week52_low is None:
+        week52_low = range_week_low
+    if week52_high is None:
+        week52_high = range_week_high
     change = None
     change_percent = None
     baseline_error = ""
@@ -3789,6 +3962,11 @@ def _fetch_nasdaq_quote(symbol):
         "change": change,
         "changePercent": change_percent,
         "previousClose": previous_close,
+        "volume": volume,
+        "dayLow": day_low,
+        "dayHigh": day_high,
+        "week52Low": week52_low,
+        "week52High": week52_high,
         "baselineError": baseline_error,
         "marketState": market_state or _market_state(),
     }
