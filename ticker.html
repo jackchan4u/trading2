@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Ticker</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="page">
+      <header class="hero ticker-hero">
+        <div class="hero__text">
+          <p class="eyebrow">Ticker</p>
+          <h1 id="tickerTitle">TICKER</h1>
+          <div class="ticker-price-row">
+            <div id="tickerPrice" class="ticker-price">--</div>
+            <div id="tickerChange" class="ticker-change neutral">--</div>
+          </div>
+        </div>
+        <div class="hero__panel">
+          <div class="panel">
+            <h2>Resumen</h2>
+            <p id="tickerMeta" class="lead">Cargando...</p>
+          </div>
+        </div>
+      </header>
+
+      <main class="grid ticker-grid">
+        <section class="card key-data-card">
+          <div class="card__header">
+            <h2>Datos clave</h2>
+          </div>
+          <div id="tickerKeyData" class="key-data"></div>
+        </section>
+      </main>
+    </div>
+
+    <script>
+      (function () {
+        const titleEl = document.getElementById("tickerTitle");
+        const metaEl = document.getElementById("tickerMeta");
+        const priceEl = document.getElementById("tickerPrice");
+        const changeEl = document.getElementById("tickerChange");
+        const keyDataEl = document.getElementById("tickerKeyData");
+        const path = window.location.pathname || "";
+        const parts = path.split("/").filter(Boolean);
+        const symbol = (parts[1] || "").toUpperCase();
+
+        if (!symbol) {
+          titleEl.textContent = "TICKER";
+          metaEl.textContent = "Simbolo no valido";
+          priceEl.textContent = "--";
+          changeEl.textContent = "--";
+          keyDataEl.innerHTML = "<div class=\"empty\">Sin datos.</div>";
+          return;
+        }
+
+        titleEl.textContent = symbol;
+        metaEl.textContent = "Cargando...";
+
+        const formatUsd = new Intl.NumberFormat("en-US", {
+          style: "currency",
+          currency: "USD",
+          maximumFractionDigits: 6,
+        });
+        const formatPercent = new Intl.NumberFormat("en-US", {
+          style: "percent",
+          maximumFractionDigits: 2,
+        });
+        const formatInteger = new Intl.NumberFormat("en-US", {
+          maximumFractionDigits: 0,
+        });
+
+        function formatPrice(value) {
+          if (!Number.isFinite(value)) return "--";
+          const abs = Math.abs(value);
+          if (abs >= 1000) return formatUsd.format(value);
+          if (abs >= 100) return `$${value.toFixed(2)}`;
+          if (abs >= 1) return `$${value.toFixed(4)}`;
+          return `$${value.toFixed(6)}`;
+        }
+
+        function formatChange(change, percent) {
+          if (!Number.isFinite(change)) return "--";
+          const sign = change > 0 ? "+" : "";
+          const pct = Number.isFinite(percent)
+            ? ` (${formatPercent.format(percent / 100)})`
+            : "";
+          return `${sign}${change.toFixed(2)}${pct}`;
+        }
+
+        function formatRange(low, high) {
+          if (!Number.isFinite(low) || !Number.isFinite(high)) return "--";
+          return `${low.toFixed(2)} - ${high.toFixed(2)}`;
+        }
+
+        function formatTime(valueMs) {
+          if (!Number.isFinite(valueMs)) return "--";
+          return new Date(valueMs).toLocaleTimeString("es-ES", {
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+          });
+        }
+
+        function formatText(value) {
+          if (value === null || value === undefined || value === "") {
+            return "--";
+          }
+          return String(value);
+        }
+
+        function renderKeyRow(label, value) {
+          return `
+            <div class="key-row">
+              <div class="key-label">${label}</div>
+              <div class="key-value">${value}</div>
+            </div>
+          `;
+        }
+
+        fetch(`/api/stocks?symbols=${encodeURIComponent(symbol)}`)
+          .then((response) => response.json())
+          .then((payload) => {
+            const item = Array.isArray(payload.data) ? payload.data[0] : null;
+            if (!item || item.error) {
+              metaEl.textContent = item && item.error ? item.error : "Sin datos";
+              priceEl.textContent = "--";
+              changeEl.textContent = "--";
+              keyDataEl.innerHTML = "<div class=\"empty\">Sin datos.</div>";
+              return;
+            }
+            const price = Number(item.price);
+            const change = Number(item.change);
+            const changePercent = Number(item.changePercent);
+            const volume = Number(item.volume);
+            const avgVolume = Number(item.avgVolume);
+            const marketCap = Number(item.marketCap);
+            const annualizedDividend = Number(item.annualizedDividend);
+            const currentYield = Number(item.currentYield);
+            const dayLow = Number(item.dayLow);
+            const dayHigh = Number(item.dayHigh);
+            const week52Low = Number(item.week52Low);
+            const week52High = Number(item.week52High);
+            const previousClose = Number(item.previousClose);
+            const exchange = formatText(item.exchange);
+            const exDividendDate = formatText(item.exDividendDate);
+            const dividendPayDate = formatText(item.dividendPayDate);
+            const updatedAtMs = Number.isFinite(item.updatedAt)
+              ? item.updatedAt * 1000
+              : NaN;
+            const sessionLabels = {
+              premarket: "Pre-mercado",
+              open: "Mercado",
+              after: "Post-mercado",
+              closed: "Cerrado",
+            };
+            const sessionLabel = sessionLabels[item.marketState] || "--";
+
+            priceEl.textContent = formatPrice(price);
+            changeEl.textContent = formatChange(change, changePercent);
+            if (Number.isFinite(change)) {
+              changeEl.className = `ticker-change ${
+                change > 0 ? "up" : change < 0 ? "down" : "neutral"
+              }`;
+            } else {
+              changeEl.className = "ticker-change neutral";
+            }
+            keyDataEl.innerHTML = [
+              renderKeyRow("Bolsa", exchange),
+              renderKeyRow(
+                "Maximo/minimo hoy",
+                formatRange(dayLow, dayHigh)
+              ),
+              renderKeyRow(
+                "Volumen de acciones",
+                Number.isFinite(volume) ? formatInteger.format(volume) : "--"
+              ),
+              renderKeyRow(
+                "Volumen promedio",
+                Number.isFinite(avgVolume) ? formatInteger.format(avgVolume) : "--"
+              ),
+              renderKeyRow(
+                "Anterior cerrar",
+                Number.isFinite(previousClose) ? formatPrice(previousClose) : "--"
+              ),
+              renderKeyRow(
+                "Maximo/minimo 52 semanas",
+                formatRange(week52Low, week52High)
+              ),
+              renderKeyRow(
+                "Capitalizacion de mercado",
+                Number.isFinite(marketCap) ? formatInteger.format(marketCap) : "--"
+              ),
+              renderKeyRow(
+                "Dividendo anualizado",
+                Number.isFinite(annualizedDividend)
+                  ? formatUsd.format(annualizedDividend)
+                  : "--"
+              ),
+              renderKeyRow("Fecha ex dividendo", exDividendDate),
+              renderKeyRow("Dividendo pago", dividendPayDate),
+              renderKeyRow(
+                "Rendimiento",
+                Number.isFinite(currentYield)
+                  ? formatPercent.format(currentYield / 100)
+                  : "--"
+              ),
+            ].join("");
+            metaEl.textContent = `Actualizado ${formatTime(updatedAtMs)} · Sesion: ${sessionLabel}`;
+          })
+          .catch(() => {
+            metaEl.textContent = "Error al cargar";
+            priceEl.textContent = "--";
+            changeEl.textContent = "--";
+            keyDataEl.innerHTML = "<div class=\"empty\">Sin datos.</div>";
+          });
+      })();
+    </script>
+  </body>
+</html>

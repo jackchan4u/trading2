@@ -41,6 +41,16 @@ const dom = {
   cryptoPressList: document.querySelector("#cryptoPressList"),
   openMobileLink: document.querySelector("#openMobileLink"),
   mobileUrl: document.querySelector("#mobileUrl"),
+  tickerDrawer: document.querySelector("#tickerDrawer"),
+  drawerSymbol: document.querySelector("#drawerSymbol"),
+  drawerPrice: document.querySelector("#drawerPrice"),
+  drawerChange: document.querySelector("#drawerChange"),
+  drawerMeta: document.querySelector("#drawerMeta"),
+  drawerKeyData: document.querySelector("#drawerKeyData"),
+  drawerChart: document.querySelector("#drawerChart"),
+  drawerChartLine: document.querySelector("#drawerChartLine"),
+  drawerChartArea: document.querySelector("#drawerChartArea"),
+  drawerChartEmpty: document.querySelector("#drawerChartEmpty"),
 };
 
 const DEFAULT_STOCK_INTERVAL_SEC = 120;
@@ -86,6 +96,7 @@ let alerts = [];
 let eventsSnapshot = null;
 let eventsSnapshotAt = 0;
 let eventsSnapshotPromise = null;
+let drawerRequestId = 0;
 const listExpansion = {
   filings: false,
   press: false,
@@ -146,6 +157,40 @@ function formatVolume(value) {
 function formatRange(low, high) {
   if (!Number.isFinite(low) || !Number.isFinite(high)) return "--";
   return `${formatNumber(low, 2)} - ${formatNumber(high, 2)}`;
+}
+
+function formatLargeNumber(value) {
+  if (!Number.isFinite(value)) return "--";
+  return formatInteger.format(Math.round(value));
+}
+
+function buildChartPath(series, width, height, padding) {
+  if (!series.length) return { line: "", area: "" };
+  const prices = series.map((point) => point.price);
+  let min = Math.min(...prices);
+  let max = Math.max(...prices);
+  if (min === max) {
+    min -= 1;
+    max += 1;
+  }
+  const innerWidth = Math.max(1, width - padding * 2);
+  const innerHeight = Math.max(1, height - padding * 2);
+  const scaleX = (index) => padding + (index / (series.length - 1 || 1)) * innerWidth;
+  const scaleY = (value) =>
+    padding + (1 - (value - min) / (max - min)) * innerHeight;
+  const points = series.map((point, idx) => ({
+    x: scaleX(idx),
+    y: scaleY(point.price),
+  }));
+  const line = points
+    .map((point, idx) => `${idx === 0 ? "M" : "L"}${point.x},${point.y}`)
+    .join(" ");
+  const baseY = padding + innerHeight;
+  const area =
+    `M${points[0].x},${baseY} ` +
+    points.map((point) => `L${point.x},${point.y}`).join(" ") +
+    ` L${points[points.length - 1].x},${baseY} Z`;
+  return { line, area };
 }
 
 function formatPrice(value) {
@@ -558,7 +603,7 @@ function createRow(symbol, variant) {
   row.className = `row data ${variant}`;
   if (variant === "stocks") {
     row.innerHTML = `
-      <div class="symbol" data-label="Simbolo">${symbol}</div>
+      <div class="symbol" data-label="Simbolo"><a class="symbol-link" data-symbol="${symbol}" href="/ticker/${encodeURIComponent(symbol)}">${symbol}</a></div>
       <div class="price" data-label="Precio">--</div>
       <div class="change neutral" data-label="Variacion">--</div>
       <div class="session" data-label="Sesion">--</div>
@@ -952,6 +997,77 @@ async function fetchCryptoPress() {
     throw new Error(payload.error || "Error API");
   }
   return Array.isArray(payload.data) ? payload.data : [];
+}
+
+async function fetchTickerChart(symbol) {
+  const url = `/api/chart?symbol=${encodeURIComponent(symbol)}`;
+  const response = await fetch(url);
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload.error || "Error API");
+  }
+  return Array.isArray(payload.data) ? payload.data : [];
+}
+
+async function fetchTickerSnapshot(symbol) {
+  const url = `/api/stocks?symbols=${encodeURIComponent(symbol)}`;
+  const response = await fetch(url);
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload.error || "Error API");
+  }
+  const item = Array.isArray(payload.data) ? payload.data[0] : null;
+  if (!item || item.error) {
+    throw new Error(item && item.error ? item.error : "Sin datos");
+  }
+  return item;
+}
+
+function renderKeyDataRows(item) {
+  const exchange = normalizeText(item.exchange, "--");
+  const dayLow = toNumberOrNaN(item.dayLow);
+  const dayHigh = toNumberOrNaN(item.dayHigh);
+  const volume = toNumberOrNaN(item.volume);
+  const avgVolume = toNumberOrNaN(item.avgVolume);
+  const previousClose = toNumberOrNaN(item.previousClose);
+  const week52Low = toNumberOrNaN(item.week52Low);
+  const week52High = toNumberOrNaN(item.week52High);
+  const marketCap = toNumberOrNaN(item.marketCap);
+  const annualizedDividend = toNumberOrNaN(item.annualizedDividend);
+  const currentYield = toNumberOrNaN(item.currentYield);
+  const exDividendDate = normalizeText(item.exDividendDate, "--");
+  const dividendPayDate = normalizeText(item.dividendPayDate, "--");
+
+  const rows = [
+    ["Bolsa", exchange],
+    ["Maximo/minimo hoy", formatRange(dayLow, dayHigh)],
+    ["Volumen de acciones", formatLargeNumber(volume)],
+    ["Volumen promedio", formatLargeNumber(avgVolume)],
+    ["Anterior cerrar", Number.isFinite(previousClose) ? formatPrice(previousClose) : "--"],
+    ["Maximo/minimo 52 semanas", formatRange(week52Low, week52High)],
+    ["Capitalizacion de mercado", formatLargeNumber(marketCap)],
+    [
+      "Dividendo anualizado",
+      Number.isFinite(annualizedDividend) ? formatUsd.format(annualizedDividend) : "--",
+    ],
+    ["Fecha ex dividendo", exDividendDate],
+    ["Dividendo pago", dividendPayDate],
+    [
+      "Rendimiento",
+      Number.isFinite(currentYield) ? formatPercent.format(currentYield / 100) : "--",
+    ],
+  ];
+
+  return rows
+    .map(
+      ([label, value]) => `
+        <div class="key-row">
+          <div class="key-label">${label}</div>
+          <div class="key-value">${value}</div>
+        </div>
+      `
+    )
+    .join("");
 }
 
 async function loadFilings() {
@@ -1465,6 +1581,131 @@ async function updateCryptos() {
   }
 }
 
+function setDrawerOpen(isOpen) {
+  if (!dom.tickerDrawer) return;
+  if (isOpen) {
+    dom.tickerDrawer.classList.add("is-open");
+    document.body.style.overflow = "hidden";
+  } else {
+    dom.tickerDrawer.classList.remove("is-open");
+    document.body.style.overflow = "";
+  }
+}
+
+function renderDrawerChart(series, change) {
+  if (!dom.drawerChart || !dom.drawerChartLine || !dom.drawerChartArea) return;
+  const chartEmpty = dom.drawerChartEmpty;
+  if (!Array.isArray(series) || series.length < 2) {
+    dom.drawerChartLine.setAttribute("d", "");
+    dom.drawerChartArea.setAttribute("d", "");
+    if (chartEmpty) chartEmpty.style.display = "flex";
+    return;
+  }
+  const viewBox = dom.drawerChart.viewBox.baseVal;
+  const width = viewBox && viewBox.width ? viewBox.width : 640;
+  const height = viewBox && viewBox.height ? viewBox.height : 240;
+  const path = buildChartPath(series, width, height, 12);
+  dom.drawerChartLine.setAttribute("d", path.line);
+  dom.drawerChartArea.setAttribute("d", path.area);
+  const strokeColor = change > 0 ? "var(--up)" : change < 0 ? "var(--down)" : "var(--muted)";
+  dom.drawerChartLine.setAttribute("stroke", strokeColor);
+  dom.drawerChartArea.setAttribute(
+    "fill",
+    change < 0 ? "rgba(201, 71, 45, 0.18)" : "url(#chartFill)"
+  );
+  if (chartEmpty) chartEmpty.style.display = "none";
+}
+
+async function openTickerDrawer(symbol) {
+  if (!dom.tickerDrawer) return;
+  const cleanSymbol = normalizeText(symbol, "").toUpperCase();
+  if (!cleanSymbol) return;
+  const requestId = ++drawerRequestId;
+  dom.drawerSymbol.textContent = cleanSymbol;
+  dom.drawerPrice.textContent = "--";
+  dom.drawerChange.textContent = "--";
+  dom.drawerChange.className = "drawer__price-change neutral";
+  dom.drawerMeta.textContent = "Cargando...";
+  if (dom.drawerKeyData) {
+    dom.drawerKeyData.innerHTML = "<div class=\"empty\">Cargando...</div>";
+  }
+  renderDrawerChart([], 0);
+  setDrawerOpen(true);
+
+  try {
+    const [snapshot, chart] = await Promise.all([
+      fetchTickerSnapshot(cleanSymbol),
+      fetchTickerChart(cleanSymbol),
+    ]);
+    if (requestId !== drawerRequestId) return;
+    const price = Number(snapshot.price);
+    const change = Number(snapshot.change);
+    const changePercent = Number(snapshot.changePercent);
+    const updatedAtMs = Number.isFinite(snapshot.updatedAt)
+      ? snapshot.updatedAt * 1000
+      : NaN;
+    const sessionLabels = {
+      premarket: "Pre-mercado",
+      open: "Mercado",
+      after: "Post-mercado",
+      closed: "Cerrado",
+    };
+    const sessionLabel = sessionLabels[snapshot.marketState] || "--";
+
+    dom.drawerPrice.textContent = formatPrice(price);
+    dom.drawerChange.textContent = formatChange(change, changePercent);
+    dom.drawerChange.className = `drawer__price-change ${
+      change > 0 ? "up" : change < 0 ? "down" : "neutral"
+    }`;
+    const updatedLabel = Number.isFinite(updatedAtMs)
+      ? formatTime(new Date(updatedAtMs))
+      : "--";
+    dom.drawerMeta.textContent = `Actualizado ${updatedLabel} · Sesion: ${sessionLabel}`;
+
+    if (dom.drawerKeyData) {
+      dom.drawerKeyData.innerHTML = renderKeyDataRows(snapshot);
+    }
+    const chartSeries = Array.isArray(chart)
+      ? chart
+          .map((point) => ({
+            t: Number(point.t),
+            price: Number(point.price),
+          }))
+          .filter((point) => Number.isFinite(point.t) && Number.isFinite(point.price))
+      : [];
+    renderDrawerChart(chartSeries, change);
+  } catch (error) {
+    if (requestId !== drawerRequestId) return;
+    dom.drawerMeta.textContent = error.message || "Sin datos";
+    if (dom.drawerKeyData) {
+      dom.drawerKeyData.innerHTML = "<div class=\"empty\">Sin datos.</div>";
+    }
+    renderDrawerChart([], 0);
+  }
+}
+
+function attachDrawerEvents() {
+  if (!dom.tickerDrawer) return;
+  dom.tickerDrawer.addEventListener("click", (event) => {
+    const action = event.target.getAttribute("data-action");
+    if (action === "close") {
+      setDrawerOpen(false);
+    }
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") setDrawerOpen(false);
+  });
+  if (dom.stocksBody) {
+    dom.stocksBody.addEventListener("click", (event) => {
+      const link = event.target.closest(".symbol-link");
+      if (!link) return;
+      event.preventDefault();
+      const symbol = link.getAttribute("data-symbol") || link.textContent;
+      openTickerDrawer(symbol);
+    });
+  }
+}
+
 function startTimers() {
   if (state.stockTimer) clearInterval(state.stockTimer);
   if (state.cryptoTimer) clearInterval(state.cryptoTimer);
@@ -1499,6 +1740,7 @@ function init() {
   renderAlerts();
   applyFilter("stocks");
   applyFilter("crypto");
+  attachDrawerEvents();
   dom.applySettings.addEventListener("click", applySettings);
   if (dom.stockFilter) {
     dom.stockFilter.addEventListener("change", () => applyFilter("stocks"));

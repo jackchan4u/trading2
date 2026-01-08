@@ -52,6 +52,9 @@ NASDAQ_DATA_URL = "https://api.nasdaq.com/api/quote/{symbol}/info?assetclass=sto
 NASDAQ_SUMMARY_URL = (
     "https://api.nasdaq.com/api/quote/{symbol}/summary?assetclass=stocks"
 )
+NASDAQ_CHART_URL = (
+    "https://api.nasdaq.com/api/quote/{symbol}/chart?assetclass=stocks"
+)
 NASDAQ_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -73,6 +76,7 @@ SEC_CACHE_PATH = os.environ.get(
     "SEC_CACHE_PATH", os.path.join(os.path.dirname(__file__), "sec_tickers.json")
 )
 SEC_CACHE_TTL = 60 * 60 * 12
+CHART_CACHE_TTL = 30
 BASELINE_CACHE_PATH = os.environ.get(
     "BASELINE_CACHE_PATH",
     os.path.join(os.path.dirname(__file__), "previous_close.json"),
@@ -127,6 +131,7 @@ _ticker_cik_loaded_at = 0.0
 _filings_cache = {}
 _news_cache = {}
 _press_cache = {}
+_chart_cache = {}
 _translation_cache = {}
 _baseline_cache = None
 TRANSLATE_DEFAULT_URLS = (
@@ -3747,6 +3752,28 @@ def _nasdaq_summary_value(payload, *keywords):
     return _nasdaq_lookup_value(payload, *keywords)
 
 
+def _nasdaq_value_text(value):
+    if value is None:
+        return ""
+    if isinstance(value, dict):
+        value = (
+            value.get("value")
+            or value.get("raw")
+            or value.get("label")
+            or value.get("text")
+        )
+    if value is None:
+        return ""
+    text = str(value).strip()
+    return text
+
+
+def _nasdaq_pick_value(summary_payload, info_payload, *keywords):
+    return _nasdaq_summary_value(summary_payload, *keywords) or _nasdaq_summary_value(
+        info_payload, *keywords
+    )
+
+
 def _nasdaq_parse_range(value):
     if value is None:
         return None, None
@@ -3832,71 +3859,82 @@ def _fetch_nasdaq_quote(symbol):
     except Exception:
         summary_payload = None
     previous_close = _nasdaq_previous_close_from_summary(summary_payload)
-    summary_volume = _nasdaq_summary_value(
+    summary_volume = _nasdaq_pick_value(
         summary_payload,
+        payload,
         "sharevolume",
         "volume",
     )
-    info_volume = _nasdaq_summary_value(payload, "sharevolume", "volume")
-    summary_day_range = _nasdaq_summary_value(
+    summary_day_range = _nasdaq_pick_value(
         summary_payload,
-        "todayshighlow",
-        "todayhighlow",
-        "dayrange",
-        "dayhighlow",
-    )
-    info_day_range = _nasdaq_summary_value(
         payload,
         "todayshighlow",
         "todayhighlow",
         "dayrange",
         "dayhighlow",
     )
-    summary_day_high = _nasdaq_summary_value(summary_payload, "dayhigh")
-    summary_day_low = _nasdaq_summary_value(summary_payload, "daylow")
-    info_day_high = _nasdaq_summary_value(payload, "dayhigh")
-    info_day_low = _nasdaq_summary_value(payload, "daylow")
-    summary_week_range = _nasdaq_summary_value(
+    summary_day_high = _nasdaq_pick_value(summary_payload, payload, "dayhigh")
+    summary_day_low = _nasdaq_pick_value(summary_payload, payload, "daylow")
+    summary_week_range = _nasdaq_pick_value(
         summary_payload,
+        payload,
         "fiftytwoweekhighlow",
         "fifttwoweekhighlow",
         "52weekhighlow",
         "52weekrange",
         "weekrange",
     )
-    info_week_range = _nasdaq_summary_value(
-        payload,
-        "fiftytwoweekhighlow",
-        "52weekhighlow",
-        "52weekrange",
-        "weekrange",
-    )
-    summary_week_high = _nasdaq_summary_value(
+    summary_week_high = _nasdaq_pick_value(
         summary_payload,
-        "fiftytwoweekhigh",
-        "52weekhigh",
-    )
-    summary_week_low = _nasdaq_summary_value(
-        summary_payload,
-        "fiftytwoweeklow",
-        "52weeklow",
-    )
-    info_week_high = _nasdaq_summary_value(
         payload,
         "fiftytwoweekhigh",
         "52weekhigh",
     )
-    info_week_low = _nasdaq_summary_value(
+    summary_week_low = _nasdaq_pick_value(
+        summary_payload,
         payload,
         "fiftytwoweeklow",
         "52weeklow",
+    )
+    exchange_value = _nasdaq_pick_value(summary_payload, payload, "exchange")
+    avg_volume_value = _nasdaq_pick_value(
+        summary_payload,
+        payload,
+        "averagevolume",
+        "avgvolume",
+    )
+    market_cap_value = _nasdaq_pick_value(
+        summary_payload,
+        payload,
+        "marketcap",
+    )
+    annual_dividend_value = _nasdaq_pick_value(
+        summary_payload,
+        payload,
+        "annualizeddividend",
+    )
+    ex_dividend_value = _nasdaq_pick_value(
+        summary_payload,
+        payload,
+        "exdividenddate",
+    )
+    dividend_pay_value = _nasdaq_pick_value(
+        summary_payload,
+        payload,
+        "dividendpaymentdate",
+        "dividendpaydate",
+    )
+    yield_value = _nasdaq_pick_value(
+        summary_payload,
+        payload,
+        "yield",
+        "currentyield",
     )
     volume = _nasdaq_first_number(
         primary.get("volume"),
         primary.get("volumeValue"),
         data.get("volume"),
         summary_volume,
-        info_volume,
     )
     if volume is not None:
         volume = int(volume)
@@ -3906,7 +3944,6 @@ def _fetch_nasdaq_quote(symbol):
         data.get("lowPrice"),
         data.get("low"),
         summary_day_low,
-        info_day_low,
     )
     day_high = _nasdaq_first_number(
         primary.get("highPrice"),
@@ -3914,13 +3951,11 @@ def _fetch_nasdaq_quote(symbol):
         data.get("highPrice"),
         data.get("high"),
         summary_day_high,
-        info_day_high,
     )
     range_day_low, range_day_high = _nasdaq_range_from_values(
         primary.get("dayRange"),
         data.get("dayRange"),
         summary_day_range,
-        info_day_range,
     )
     if day_low is None:
         day_low = range_day_low
@@ -3930,20 +3965,28 @@ def _fetch_nasdaq_quote(symbol):
         primary.get("fiftyTwoWeekLow"),
         data.get("fiftyTwoWeekLow"),
         summary_week_low,
-        info_week_low,
     )
     week52_high = _nasdaq_first_number(
         primary.get("fiftyTwoWeekHigh"),
         data.get("fiftyTwoWeekHigh"),
         summary_week_high,
-        info_week_high,
     )
     range_week_low, range_week_high = _nasdaq_range_from_values(
         primary.get("yearRange"),
         data.get("yearRange"),
         summary_week_range,
-        info_week_range,
     )
+    avg_volume = _to_float_loose(avg_volume_value)
+    if avg_volume is not None:
+        avg_volume = int(avg_volume)
+    market_cap = _to_float_loose(market_cap_value)
+    if market_cap is not None:
+        market_cap = int(market_cap)
+    annualized_dividend = _to_float_loose(annual_dividend_value)
+    current_yield = _to_float_loose(yield_value)
+    exchange = _nasdaq_value_text(exchange_value)
+    ex_dividend_date = _nasdaq_value_text(ex_dividend_value)
+    dividend_pay_date = _nasdaq_value_text(dividend_pay_value)
     if week52_low is None:
         week52_low = range_week_low
     if week52_high is None:
@@ -3963,6 +4006,13 @@ def _fetch_nasdaq_quote(symbol):
         "changePercent": change_percent,
         "previousClose": previous_close,
         "volume": volume,
+        "avgVolume": avg_volume,
+        "marketCap": market_cap,
+        "annualizedDividend": annualized_dividend,
+        "exDividendDate": ex_dividend_date,
+        "dividendPayDate": dividend_pay_date,
+        "currentYield": current_yield,
+        "exchange": exchange,
         "dayLow": day_low,
         "dayHigh": day_high,
         "week52Low": week52_low,
@@ -3985,6 +4035,63 @@ def fetch_nasdaq_quotes(symbols):
             results[symbol] = {"error": "Sin datos Nasdaq"}
         time.sleep(0.08)
     return results
+
+
+def _get_chart_cache(symbol):
+    cached = _chart_cache.get(symbol)
+    if not cached:
+        return None
+    if (time.time() - cached["time"]) >= CHART_CACHE_TTL:
+        del _chart_cache[symbol]
+        return None
+    return cached["data"]
+
+
+def _set_chart_cache(symbol, data):
+    _chart_cache[symbol] = {"time": time.time(), "data": data}
+
+
+def _fetch_nasdaq_chart(symbol):
+    symbol = symbol.upper()
+    cached = _get_chart_cache(symbol)
+    if cached is not None:
+        return cached
+    url = NASDAQ_CHART_URL.format(symbol=urllib.parse.quote(symbol))
+    payload = _fetch_nasdaq_json(url)
+    if not isinstance(payload, dict):
+        raise ValueError("Respuesta Nasdaq invalida")
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        raise ValueError("Datos Nasdaq invalidos")
+    chart = data.get("chart") or []
+    if not isinstance(chart, list):
+        chart = []
+    series = []
+    for point in chart:
+        if not isinstance(point, dict):
+            continue
+        timestamp = point.get("x")
+        price = _to_float_loose(point.get("y"))
+        if timestamp is None or price is None:
+            continue
+        label = ""
+        meta = point.get("z")
+        if isinstance(meta, dict):
+            label = meta.get("dateTime") or ""
+        series.append(
+            {
+                "t": int(timestamp),
+                "price": price,
+                "label": label,
+            }
+        )
+    response = {
+        "symbol": symbol,
+        "timeAsOf": data.get("timeAsOf") or "",
+        "series": series,
+    }
+    _set_chart_cache(symbol, response)
+    return response
 
 
 def parse_symbols():
@@ -4304,6 +4411,11 @@ def index():
     return send_from_directory(".", "index.html")
 
 
+@app.route("/ticker/<symbol>")
+def ticker_page(symbol):
+    return send_from_directory(".", "ticker.html")
+
+
 @app.route("/api/stocks")
 def api_stocks():
     symbols = parse_symbols()
@@ -4414,6 +4526,24 @@ def api_stocks():
         },
     }
     return jsonify(response)
+
+
+@app.route("/api/chart")
+def api_chart():
+    symbol = request.args.get("symbol", "").strip()
+    if not symbol:
+        return jsonify({"error": "symbol requerido"}), 400
+    try:
+        payload = _fetch_nasdaq_chart(symbol)
+        return jsonify(
+            {
+                "symbol": payload.get("symbol"),
+                "data": payload.get("series") or [],
+                "meta": {"timeAsOf": payload.get("timeAsOf") or ""},
+            }
+        )
+    except Exception as exc:
+        return jsonify({"error": str(exc) or "Error API"}), 502
 
 
 @app.route("/api/filings")

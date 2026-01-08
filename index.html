@@ -192,6 +192,52 @@
         </section>
       </section>
 
+      <div id="tickerDrawer" class="drawer">
+        <div class="drawer__backdrop" data-action="close"></div>
+        <div class="drawer__panel">
+          <button class="drawer__close" data-action="close" type="button">Cerrar</button>
+          <div class="drawer__header">
+            <div>
+              <div class="drawer__eyebrow">Ticker</div>
+              <div id="drawerSymbol" class="drawer__symbol">--</div>
+            </div>
+            <div class="drawer__price">
+              <div id="drawerPrice" class="drawer__price-value">--</div>
+              <div id="drawerChange" class="drawer__price-change neutral">--</div>
+              <div id="drawerMeta" class="drawer__meta">--</div>
+            </div>
+          </div>
+
+          <div class="drawer__grid">
+            <section class="card drawer__chart">
+              <div class="card__header">
+                <h2>Grafico intradia</h2>
+              </div>
+              <div class="chart-wrap">
+                <svg id="drawerChart" viewBox="0 0 640 240" preserveAspectRatio="none">
+                  <defs>
+                    <linearGradient id="chartFill" x1="0" x2="0" y1="0" y2="1">
+                      <stop offset="0%" stop-color="rgba(13, 139, 95, 0.35)"></stop>
+                      <stop offset="100%" stop-color="rgba(13, 139, 95, 0)"></stop>
+                    </linearGradient>
+                  </defs>
+                  <path id="drawerChartArea" fill="url(#chartFill)" stroke="none"></path>
+                  <path id="drawerChartLine" fill="none" stroke="var(--accent)" stroke-width="2"></path>
+                </svg>
+                <div id="drawerChartEmpty" class="empty">Sin datos de grafico.</div>
+              </div>
+            </section>
+
+            <section class="card drawer__key">
+              <div class="card__header">
+                <h2>Datos clave</h2>
+              </div>
+              <div id="drawerKeyData" class="key-data"></div>
+            </section>
+          </div>
+        </div>
+      </div>
+
       <footer class="foot">
         <p>
           Nota: los precios se actualizan de forma periodica y pueden estar
@@ -202,6 +248,6 @@
         </p>
       </footer>
     </div>
-    <script src="app.js?v=events9"></script>
+    <script src="app.js?v=events10"></script>
   </body>
 </html>
