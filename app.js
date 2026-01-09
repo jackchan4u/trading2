@@ -2,7 +2,7 @@ const STOCKS = [
   "NVDA",
   "MRVL",
   "AMD",
-  "UNH",
+  "SMCI",
   "QBTS",
   "APLD",
   "SOUN",

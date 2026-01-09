@@ -21,7 +21,7 @@ DEFAULT_SYMBOLS = [
     "NVDA",
     "MRVL",
     "AMD",
-    "UNH",
+    "SMCI",
     "QBTS",
     "APLD",
     "SOUN",
@@ -114,7 +114,7 @@ KNOWN_CIKS = {
     "NVDA": "0001045810",
     "MRVL": "0001835632",
     "AMD": "0000002488",
-    "UNH": "0000731766",
+    "SMCI": "0001375365",
     "SOUN": "0001850453",
     "APLD": "0001787195",
 }
