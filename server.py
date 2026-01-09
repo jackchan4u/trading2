@@ -9,7 +9,7 @@ import urllib.parse
 import urllib.request
 import urllib.error
 from collections import deque
-from datetime import datetime, time as dt_time
+from datetime import datetime, time as dt_time, timedelta
 from email.utils import parsedate_to_datetime
 from html import unescape
 from zoneinfo import ZoneInfo
@@ -3833,7 +3833,7 @@ def _fetch_nasdaq_quote(symbol):
     if extended_state and not market_state:
         market_state = extended_state
 
-    price = _nasdaq_first_number(
+    regular_price = _nasdaq_first_number(
         primary.get("lastSalePrice"),
         primary.get("price"),
         data.get("lastSalePrice"),
@@ -3845,6 +3845,9 @@ def _fetch_nasdaq_quote(symbol):
         extended.get("price"),
     )
 
+    price = regular_price
+    if price is None and extended_price is not None:
+        price = extended_price
     if market_state in ("premarket", "after") and extended_price is not None:
         price = extended_price
 
@@ -3993,17 +3996,34 @@ def _fetch_nasdaq_quote(symbol):
         week52_high = range_week_high
     change = None
     change_percent = None
+    regular_change = None
+    regular_change_percent = None
+    extended_change = None
+    extended_change_percent = None
     baseline_error = ""
     if previous_close is None or previous_close == 0:
         baseline_error = "Error baseline: cierre NASDAQ no disponible"
     else:
         change = price - previous_close
         change_percent = (change / previous_close) * 100
+        if regular_price is not None:
+            regular_change = regular_price - previous_close
+            regular_change_percent = (regular_change / previous_close) * 100
+        base_price = regular_price if regular_price is not None else previous_close
+        if extended_price is not None and base_price:
+            extended_change = extended_price - base_price
+            extended_change_percent = (extended_change / base_price) * 100
 
     return {
         "price": price,
         "change": change,
         "changePercent": change_percent,
+        "regularPrice": regular_price,
+        "regularChange": regular_change,
+        "regularChangePercent": regular_change_percent,
+        "extendedPrice": extended_price,
+        "extendedChange": extended_change,
+        "extendedChangePercent": extended_change_percent,
         "previousClose": previous_close,
         "volume": volume,
         "avgVolume": avg_volume,
@@ -4037,26 +4057,48 @@ def fetch_nasdaq_quotes(symbols):
     return results
 
 
-def _get_chart_cache(symbol):
-    cached = _chart_cache.get(symbol)
+def _chart_cache_key(symbol, range_key):
+    return f"{symbol}:{range_key}"
+
+
+def _get_chart_cache(symbol, range_key):
+    cache_key = _chart_cache_key(symbol, range_key)
+    cached = _chart_cache.get(cache_key)
     if not cached:
         return None
     if (time.time() - cached["time"]) >= CHART_CACHE_TTL:
-        del _chart_cache[symbol]
+        del _chart_cache[cache_key]
         return None
     return cached["data"]
 
 
-def _set_chart_cache(symbol, data):
-    _chart_cache[symbol] = {"time": time.time(), "data": data}
+def _set_chart_cache(symbol, range_key, data):
+    cache_key = _chart_cache_key(symbol, range_key)
+    _chart_cache[cache_key] = {"time": time.time(), "data": data}
 
 
-def _fetch_nasdaq_chart(symbol):
+def _fetch_nasdaq_chart(symbol, range_key="1D"):
     symbol = symbol.upper()
-    cached = _get_chart_cache(symbol)
+    range_key = (range_key or "1D").upper()
+    cached = _get_chart_cache(symbol, range_key)
     if cached is not None:
         return cached
     url = NASDAQ_CHART_URL.format(symbol=urllib.parse.quote(symbol))
+    if range_key in ("5D", "1M", "6M"):
+        end_date = datetime.now(MARKET_TZ).date()
+        if range_key == "5D":
+            start_date = end_date - timedelta(days=7)
+        elif range_key == "1M":
+            start_date = end_date - timedelta(days=31)
+        else:
+            start_date = end_date - timedelta(days=186)
+        params = urllib.parse.urlencode(
+            {
+                "fromdate": start_date.isoformat(),
+                "todate": end_date.isoformat(),
+            }
+        )
+        url = f"{url}&{params}"
     payload = _fetch_nasdaq_json(url)
     if not isinstance(payload, dict):
         raise ValueError("Respuesta Nasdaq invalida")
@@ -4088,9 +4130,10 @@ def _fetch_nasdaq_chart(symbol):
     response = {
         "symbol": symbol,
         "timeAsOf": data.get("timeAsOf") or "",
+        "range": range_key,
         "series": series,
     }
-    _set_chart_cache(symbol, response)
+    _set_chart_cache(symbol, range_key, response)
     return response
 
 
@@ -4533,13 +4576,17 @@ def api_chart():
     symbol = request.args.get("symbol", "").strip()
     if not symbol:
         return jsonify({"error": "symbol requerido"}), 400
+    range_key = request.args.get("range", "1D").strip().upper()
     try:
-        payload = _fetch_nasdaq_chart(symbol)
+        payload = _fetch_nasdaq_chart(symbol, range_key)
         return jsonify(
             {
                 "symbol": payload.get("symbol"),
                 "data": payload.get("series") or [],
-                "meta": {"timeAsOf": payload.get("timeAsOf") or ""},
+                "meta": {
+                    "timeAsOf": payload.get("timeAsOf") or "",
+                    "range": payload.get("range") or range_key,
+                },
             }
         )
     except Exception as exc:

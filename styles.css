@@ -319,6 +319,10 @@ h1 {
   gap: 6px;
 }
 
+.table--stocks {
+  gap: 6px;
+}
+
 .row {
   display: grid;
   grid-template-columns: 1.1fr 1fr 1fr 1fr;
@@ -331,7 +335,12 @@ h1 {
 }
 
 .row.stocks {
-  grid-template-columns: 1.1fr 1fr 1fr 0.8fr 1fr 1fr 1fr 0.9fr;
+  display: block;
+  background: rgba(255, 255, 255, 0.6);
+  border-radius: 12px;
+  border: 1px solid rgba(15, 17, 20, 0.06);
+  padding: 10px 12px;
+  width: 100%;
 }
 
 .row.crypto {
@@ -355,8 +364,104 @@ h1 {
   background: rgba(255, 255, 255, 0.9);
 }
 
+.row.data.stocks:hover {
+  transform: none;
+  background: rgba(255, 255, 255, 0.5);
+}
+
 .row .symbol {
   font-weight: 600;
+}
+
+.stock-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(120px, 180px);
+  align-items: center;
+  gap: 12px;
+}
+
+.stock-left {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.stock-name {
+  font-weight: 700;
+  font-size: 1rem;
+}
+
+.stock-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.stock-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  font-size: 0.7rem;
+  border: 1px solid rgba(123, 128, 134, 0.35);
+  color: #7b8086;
+  background: rgba(123, 128, 134, 0.12);
+}
+
+.stock-status.is-open {
+  color: #0b8b5f;
+  border-color: rgba(11, 139, 95, 0.35);
+  background: rgba(11, 139, 95, 0.12);
+}
+
+.stock-status.is-after {
+  color: #c63a2e;
+  border-color: rgba(198, 58, 46, 0.35);
+  background: rgba(198, 58, 46, 0.12);
+}
+
+.stock-status.is-premarket {
+  color: #d07f1e;
+  border-color: rgba(208, 127, 30, 0.35);
+  background: rgba(208, 127, 30, 0.12);
+}
+
+.stock-right {
+  text-align: right;
+  justify-self: end;
+}
+
+.stock-price {
+  font-weight: 700;
+  font-size: 1rem;
+}
+
+.stock-change {
+  font-weight: 600;
+}
+
+.stock-extended {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.stock-extended.is-hidden {
+  display: none;
+}
+
+.stock-ext-price {
+  font-weight: 600;
+  color: #2b2f33;
 }
 
 .symbol-link {
@@ -493,6 +598,38 @@ h1 {
   display: none;
   align-items: center;
   justify-content: center;
+  color: var(--muted);
+}
+
+.chart-range {
+  display: inline-flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.chart-range button {
+  border: 1px solid rgba(15, 17, 20, 0.14);
+  background: transparent;
+  color: var(--muted);
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.chart-range button.is-active {
+  background: var(--accent);
+  color: #fff;
+  border-color: transparent;
+}
+
+.chart-axis {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 0.75rem;
   color: var(--muted);
 }
 
@@ -773,16 +910,19 @@ h1 {
     font-size: 0.85rem;
   }
 
-  .row.stocks,
   .row.crypto {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .row.stocks {
+    display: block;
   }
 
   .row.head {
     display: none;
   }
 
-  .row.data > div {
+  .row.data.crypto > div {
     display: flex;
     flex-direction: column;
     gap: 2px;
@@ -791,7 +931,7 @@ h1 {
     word-break: break-word;
   }
 
-  .row.data > div::before {
+  .row.data.crypto > div::before {
     content: attr(data-label);
     font-size: 0.6rem;
     text-transform: uppercase;

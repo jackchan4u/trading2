@@ -84,17 +84,7 @@
               </select>
             </div>
           </div>
-          <div class="table">
-            <div class="row head stocks">
-              <div>Simbolo</div>
-              <div>Precio</div>
-              <div>Variacion</div>
-              <div>Sesion</div>
-              <div>Volumen</div>
-              <div>Rango 52s</div>
-              <div>Rango dia</div>
-              <div>Actualizado</div>
-            </div>
+          <div class="table table--stocks">
             <div id="stocksBody" class="body"></div>
           </div>
         </section>
@@ -211,7 +201,13 @@
           <div class="drawer__grid">
             <section class="card drawer__chart">
               <div class="card__header">
-                <h2>Grafico intradia</h2>
+                <h2>Grafico</h2>
+                <div class="chart-range">
+                  <button type="button" data-chart-range="1D">1D</button>
+                  <button type="button" data-chart-range="5D">5D</button>
+                  <button type="button" data-chart-range="1M">1M</button>
+                  <button type="button" data-chart-range="6M">6M</button>
+                </div>
               </div>
               <div class="chart-wrap">
                 <svg id="drawerChart" viewBox="0 0 640 240" preserveAspectRatio="none">
@@ -226,6 +222,7 @@
                 </svg>
                 <div id="drawerChartEmpty" class="empty">Sin datos de grafico.</div>
               </div>
+              <div id="drawerChartAxis" class="chart-axis"></div>
             </section>
 
             <section class="card drawer__key">
@@ -248,6 +245,6 @@
         </p>
       </footer>
     </div>
-    <script src="app.js?v=events10"></script>
+    <script src="app.js?v=events12"></script>
   </body>
 </html>
